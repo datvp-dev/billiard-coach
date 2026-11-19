@@ -75,19 +75,19 @@ function buildCard(s: Suggestion, index: number, portrait: boolean, onSelect: (i
   for (let i = 1; i <= 5; i++) bars.append(h('i', i <= s.powerLevel ? 'on' : ''));
   power.append(bars, `Lực ${powerLabel(s.powerLevel)}`);
   meta.append(power);
-  meta.append(h('span', '', `Đầu cơ: ${tipLabel(s.tipName)}`));
   if (s.kind === 'pot') {
     const label = potLabel(s.potProb);
     const pot = h('span');
-    pot.append('Ăn bi: ');
+    pot.append('Ăn bi ');
     pot.append(h('b', label === 'Dễ' ? 'easy' : label === 'Trung bình' ? 'mid' : 'hard', `${Math.round(s.potProb * 100)}% · ${label}`));
     meta.append(pot);
   }
   card.append(meta);
   card.append(h('p', '', s.text));
 
-  const replay = h('button', 'replay', '▶ Xem lại');
+  const replay = h('button', 'replay', '▶');
   replay.type = 'button';
+  replay.setAttribute('aria-label', 'Xem lại cú đánh');
   replay.addEventListener('click', (e) => {
     e.stopPropagation();
     onSelect(index);

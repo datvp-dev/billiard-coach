@@ -116,3 +116,32 @@ test('loadInitial prefers the URL, then storage, then the sample; garbage never 
   storage.setItem(STORAGE_KEY, JSON.stringify({ layout: 5, cloth: 'warp' }));
   expect(loadInitial('', storage).cloth).toBe('medium');
 });
+
+// --- final review, finding 1: persistence must not run per pointer move, nor break the drag ---
+test('a burst of moves writes the URL and storage once, after the debounce', () => {
+  const { hashes, storage, store } = setup();
+  const before = hashes.length;
+  for (let i = 0; i < 50; i++) store.moveBall(1, v2(1.0 + i * 0.01, 0.5));
+  expect(hashes.length).toBe(before);
+  vi.advanceTimersByTime(150);
+  expect(hashes.length).toBe(before + 1);
+  expect(hashes[hashes.length - 1]).toBe(encodeLayout(store.get().layout));
+  expect(JSON.parse(storage.getItem(STORAGE_KEY)!).layout).toBe(encodeLayout(store.get().layout));
+});
+test('a throwing history or storage does not stop redraws or advice', () => {
+  const requests: Layout[] = [];
+  const client: AdvisorClient = { request: (l) => void requests.push(l), dispose: () => {} };
+  const storage = { getItem: () => null, setItem: () => { throw new Error('QuotaExceededError'); } };
+  const store = createStore(client, {
+    storage,
+    initial: { layout: decodeLayout('m9;0:635,635;1:1700,800'), cloth: 'medium' },
+    setHash: () => { throw new Error('SecurityError'); },
+  });
+  let emitted = 0;
+  store.subscribe(() => emitted++);
+  store.moveBall(1, v2(1.0, 0.5));
+  expect(emitted).toBe(1);
+  vi.advanceTimersByTime(150);
+  expect(requests).toHaveLength(2);
+  expect(encodeLayout(requests[1])).toBe('m9;0:635,635;1:1000,500');
+});

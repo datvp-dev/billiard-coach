@@ -40,7 +40,10 @@ export function slipVelocity(b: Body): Vec2 {
 }
 
 export function isMoving(b: Body): boolean {
-  return b.active && (Math.abs(b.vel.x) > STOP_EPS || Math.abs(b.vel.y) > STOP_EPS || Math.abs(b.w.z) > SPIN_EPS);
+  if (!b.active) return false;
+  if (Math.abs(b.vel.x) > STOP_EPS || Math.abs(b.vel.y) > STOP_EPS || Math.abs(b.w.z) > SPIN_EPS) return true;
+  // A ball at a momentary standstill that is still spinning on the cloth (draw reversing direction) is not at rest.
+  return Math.hypot(b.vel.x - R * b.w.y, b.vel.y + R * b.w.x) > SLIP_EPS;
 }
 
 /** Advance one body by dt. Exact within each motion state; splits dt at the slide -> roll transition. */

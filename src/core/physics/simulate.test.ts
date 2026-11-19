@@ -121,3 +121,14 @@ test('one full simulation takes under 5 ms on average', () => {
   for (let i = 0; i < 100; i++) sim(std, { dir: 0, speed: 2.5, tip: TIPS.high });
   expect(performance.now() - t).toBeLessThan(500);
 });
+
+// --- final review, finding 2: a draw shot must not freeze when its speed crosses zero on a step boundary ---
+test('straight draw shots draw back at every distance, never dead-stop', () => {
+  for (const speed of [1.1, 1.8, 2.9]) {
+    for (let gap = 0.1; gap <= 0.125; gap += 0.001) {
+      const r = sim([{ id: 0, pos: v2(0.5, 0.635) }, { id: 1, pos: v2(0.5 + gap, 0.635) }], { dir: 0, speed, tip: TIPS.low });
+      const contactX = 0.5 + gap - 2 * R;
+      expect(contactX - cueEnd(r).x, `speed ${speed}, gap ${gap.toFixed(3)}`).toBeGreaterThan(0.05);
+    }
+  }
+});

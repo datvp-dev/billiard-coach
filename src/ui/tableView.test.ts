@@ -48,3 +48,14 @@ test('9 and 10 are stripes', () => {
   expect(ballColor(8).stripe).toBe(false);
   expect(ballColor(9).fill).toBe(ballColor(1).fill);
 });
+
+// --- final review, finding 3: an upright phone keeps the table upright even when the canvas box is wider than tall ---
+test('orientation can be forced by the caller', () => {
+  const t = computeTransform(390, 345, true);
+  expect(t.portrait).toBe(true);
+  const a = t.toScreen(v2(0, 0.635));
+  const b = t.toScreen(v2(2.54, 0.635));
+  expect(Math.abs(a.y - b.y)).toBeGreaterThan(Math.abs(a.x - b.x));
+  expect(b.y).toBeLessThan(345);
+  expect(computeTransform(900, 420, false).portrait).toBe(false);
+});

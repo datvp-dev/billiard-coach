@@ -12,9 +12,9 @@ const RAIL = 0.085;
 /**
  * Fit the table (with rails) into a cssW x cssH box. Landscape: x right, y up.
  * Portrait: the landscape picture turned a quarter turn clockwise (table x runs down the screen).
+ * Orientation follows the box unless the caller forces it (an upright phone keeps an upright table).
  */
-export function computeTransform(cssW: number, cssH: number): ViewTransform {
-  const portrait = cssH > cssW;
+export function computeTransform(cssW: number, cssH: number, portrait: boolean = cssH > cssW): ViewTransform {
   const long = L + 2 * RAIL;
   const short = W + 2 * RAIL;
   const scale = Math.max(1e-6, portrait ? Math.min(cssW / short, cssH / long) : Math.min(cssW / long, cssH / short));

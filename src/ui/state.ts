@@ -64,6 +64,8 @@ export function createStore(
   let timer: ReturnType<typeof setTimeout> | null = null;
 
   const emit = () => subs.forEach((fn) => fn(state));
+  // Runs from the debounced path only: browsers throttle history.replaceState (Safari throws
+  // after 100 calls in a short window), and a drag fires far more pointer moves than that.
   const persist = () => {
     const code = encodeLayout(state.layout);
     try {
@@ -71,17 +73,21 @@ export function createStore(
     } catch {
       // storage full or blocked: the position still lives in the URL
     }
-    env.setHash?.(code);
+    try {
+      env.setHash?.(code);
+    } catch {
+      // history throttled or unavailable: the position is still saved on the device
+    }
   };
-  const requestNow = () => {
+  const requestNow = (save = true) => {
     timer = null;
+    if (save) persist();
     client.request(state.layout, { cloth: state.cloth });
   };
   const changed = (layout: Layout, cloth = state.cloth) => {
     state = { layout, cloth, advice: null, selected: 0, computing: true };
-    persist();
     if (timer !== null) clearTimeout(timer);
-    timer = setTimeout(requestNow, DEBOUNCE_MS);
+    timer = setTimeout(() => requestNow(), DEBOUNCE_MS);
     emit();
   };
 
@@ -129,6 +135,6 @@ export function createStore(
     },
   };
 
-  requestNow();
+  requestNow(false);
   return store;
 }

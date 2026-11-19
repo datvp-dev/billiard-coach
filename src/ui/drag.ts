@@ -4,6 +4,12 @@ import type { Store } from './state';
 import type { TableUi, ViewTransform } from './tableView';
 
 const MIN_GRAB_PX = 22;
+/** How far into the tray a release must be to take the ball off: a small overshoot past the end rail must not. */
+const TRAY_INSET_PX = 10;
+
+export function releaseRemovesBall(p: Vec2, tray: { top: number; bottom: number; left: number; right: number }): boolean {
+  return p.x >= tray.left && p.x <= tray.right && p.y >= tray.top + TRAY_INSET_PX && p.y <= tray.bottom;
+}
 
 /**
  * Drag balls with a finger or mouse. Releasing a ball over the tray takes it off the table.
@@ -56,8 +62,7 @@ export function attachDrag(
     ui.drag.finger = p;
     const t = getTransform();
     store.moveBall(ui.drag.id, t.toTable({ x: p.x + grabOffset.x, y: p.y + grabOffset.y }));
-    const over = document.elementFromPoint(e.clientX, e.clientY);
-    tray.classList.toggle('drop-target', !!over && tray.contains(over));
+    tray.classList.toggle('drop-target', releaseRemovesBall({ x: e.clientX, y: e.clientY }, tray.getBoundingClientRect()));
   });
 
   const end = (e: PointerEvent, cancelled: boolean) => {
@@ -68,8 +73,7 @@ export function attachDrag(
     canvas.classList.remove('dragging');
     tray.classList.remove('drop-target');
     if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
-    const over = cancelled ? null : document.elementFromPoint(e.clientX, e.clientY);
-    if (over && tray.contains(over)) store.toggleBall(id);
+    if (!cancelled && releaseRemovesBall({ x: e.clientX, y: e.clientY }, tray.getBoundingClientRect())) store.toggleBall(id);
     redraw();
   };
   canvas.addEventListener('pointerup', (e) => end(e, false));

@@ -61,7 +61,8 @@ function resize() {
   const dpr = window.devicePixelRatio || 1;
   canvas.width = Math.max(1, Math.round(cssW * dpr));
   canvas.height = Math.max(1, Math.round(cssH * dpr));
-  transform = computeTransform(cssW, cssH);
+  // Orientation comes from the screen, not the canvas box: browser bars can leave a wide, short box on an upright phone.
+  transform = computeTransform(cssW, cssH, window.innerHeight >= window.innerWidth);
   redraw();
 }
 
