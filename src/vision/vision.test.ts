@@ -103,3 +103,7 @@ test('when two balls look like the same number only one keeps it', () => {
 test('pockets and an empty table give no balls', () => {
   expect(detectBalls(drawTable(800, 550, OVERHEAD, true, []), OVERHEAD, true, '9')).toEqual([]);
 });
+test('corners of a wide trapezoid are ordered by its top edge, not by which point is nearest the picture corner', () => {
+  const q = orderCorners([P(-164, 613), P(1240, 653), P(207, 441), P(1107, 473)]);
+  expect(q).toEqual([P(207, 441), P(1107, 473), P(1240, 653), P(-164, 613)]);
+});

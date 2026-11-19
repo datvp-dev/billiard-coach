@@ -1,6 +1,7 @@
 import './style.css';
 import { createCards } from './ui/cards';
 import { attachDrag } from './ui/drag';
+import { createPhotoImport } from './ui/photo';
 import { sampleAt, simDuration } from './ui/replay';
 import { activeSuggestion, createStore, loadInitial, type StorageLike } from './ui/state';
 import { computeTransform, drawTable, type TableUi, type ViewTransform } from './ui/tableView';
@@ -39,7 +40,8 @@ const store = createStore(client, {
   setHash: (code) => history.replaceState(null, '', `#${code}`),
 });
 
-const toolbar = createToolbar(bar, store);
+const photoImport = createPhotoImport({ host: document.body, mode: () => store.get().layout.mode, place: (layout) => store.setLayout(layout) });
+const toolbar = createToolbar(bar, store, () => photoImport.pick());
 const tray = createTray(trayEl, store);
 const ui: TableUi = {};
 const ctx = canvas.getContext('2d')!;

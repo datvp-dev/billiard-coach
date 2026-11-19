@@ -1,22 +1,31 @@
 import type { Vec2 } from '../core/types';
-import { looksLikeCloth, toneOf, type Raster, type Tone } from './raster';
+import { looksLikeCloth, rgbToHsv, toneOf, type Raster, type Tone } from './raster';
 
-/** The colour that fills most of the middle of the picture, taken to be the cloth. */
+/**
+ * The cloth colour: the most common strongly coloured tone in the picture, with the middle of
+ * the frame and the usual cloth hues (green through blue) counting for more. Walls and floors
+ * are often larger than the table but rarely as saturated.
+ */
 export function estimateCloth(img: Raster): Tone | null {
   const BINS = 24;
+  const score = new Float64Array(BINS * BINS);
   const counts = new Float64Array(BINS * BINS);
   const sums = new Float64Array(BINS * BINS * 3);
-  const x0 = Math.floor(img.width * 0.25);
-  const x1 = Math.ceil(img.width * 0.75);
-  const y0 = Math.floor(img.height * 0.25);
-  const y1 = Math.ceil(img.height * 0.75);
-  const step = Math.max(1, Math.floor(Math.min(x1 - x0, y1 - y0) / 120));
-  for (let y = y0; y < y1; y += step) {
-    for (let x = x0; x < x1; x += step) {
+  const step = Math.max(1, Math.floor(Math.min(img.width, img.height) / 160));
+  for (let y = 0; y < img.height; y += step) {
+    for (let x = 0; x < img.width; x += step) {
       const i = (y * img.width + x) * 4;
-      const t = toneOf(img.data[i], img.data[i + 1], img.data[i + 2]);
+      const r = img.data[i];
+      const g = img.data[i + 1];
+      const b = img.data[i + 2];
+      const t = toneOf(r, g, b);
       if (t.lum < 0.08) continue;
+      const [hue, sat] = rgbToHsv(r, g, b);
+      if (sat < 0.25) continue;
       const k = Math.min(BINS - 1, Math.floor(t.cr * BINS)) * BINS + Math.min(BINS - 1, Math.floor(t.cg * BINS));
+      const central = Math.abs(x / img.width - 0.5) < 0.3 && Math.abs(y / img.height - 0.5) < 0.3 ? 1.5 : 1;
+      const usual = hue >= 80 && hue <= 260 ? 3 : 1;
+      score[k] += sat * central * usual;
       counts[k]++;
       sums[k * 3] += t.cr;
       sums[k * 3 + 1] += t.cg;
@@ -24,8 +33,8 @@ export function estimateCloth(img: Raster): Tone | null {
     }
   }
   let best = -1;
-  for (let k = 0; k < counts.length; k++) if (best < 0 || counts[k] > counts[best]) best = k;
-  if (best < 0 || counts[best] === 0) return null;
+  for (let k = 0; k < score.length; k++) if (score[k] > 0 && (best < 0 || score[k] > score[best])) best = k;
+  if (best < 0) return null;
   const n = counts[best];
   return { cr: sums[best * 3] / n, cg: sums[best * 3 + 1] / n, lum: sums[best * 3 + 2] / n };
 }
@@ -98,13 +107,21 @@ export function enclosingQuad(hull: Vec2[]): Vec2[] | null {
   return poly.length === 4 ? poly : null;
 }
 
-/** Top-left, top-right, bottom-right, bottom-left as they appear in the picture (y grows downward). */
+/**
+ * Top-left, top-right, bottom-right, bottom-left as they appear in the picture (y grows
+ * downward). The "top" edge is the one highest in the picture, which also holds for a table
+ * that perspective has squeezed into a wide trapezoid.
+ */
 export function orderCorners(q: Vec2[]): Vec2[] {
   const cx = q.reduce((s, p) => s + p.x, 0) / q.length;
   const cy = q.reduce((s, p) => s + p.y, 0) / q.length;
   const sorted = q.slice().sort((a, b) => Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx));
   let start = 0;
-  for (let i = 1; i < sorted.length; i++) if (sorted[i].x + sorted[i].y < sorted[start].x + sorted[start].y) start = i;
+  let best = Infinity;
+  for (let i = 0; i < 4; i++) {
+    const top = sorted[i].y + sorted[(i + 1) % 4].y;
+    if (top < best) (best = top), (start = i);
+  }
   return [0, 1, 2, 3].map((k) => sorted[(start + k) % 4]);
 }
 

@@ -29,8 +29,9 @@ export function classifyBall(rgb: number[], mode: GameMode): Guess {
   for (let i = 0; i < rgb.length; i += 3) {
     const [h, s, v] = rgbToHsv(rgb[i], rgb[i + 1], rgb[i + 2]);
     if (v < 0.2) black++;
-    else if (s < 0.28) {
-      if (v > 0.5) white++;
+    else if (s < 0.3) {
+      // A white ball in dim light is grey, not black.
+      if (v > 0.38) white++;
       else black += 0.5;
     } else {
       sx += Math.cos((h * Math.PI) / 180) * s;

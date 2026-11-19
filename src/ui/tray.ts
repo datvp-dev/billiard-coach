@@ -12,7 +12,7 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls = '', text = ''):
 }
 
 /** Top bar: game mode, cloth speed, random / clear / share. */
-export function createToolbar(root: HTMLElement, store: Store): { update(s: AppState): void } {
+export function createToolbar(root: HTMLElement, store: Store, onPhoto?: () => void): { update(s: AppState): void } {
   const modes = el('div', 'seg');
   modes.setAttribute('role', 'group');
   modes.setAttribute('aria-label', 'Chế độ chơi');
@@ -36,7 +36,14 @@ export function createToolbar(root: HTMLElement, store: Store): { update(s: AppS
   clothWrap.append(cloth);
 
   const actions = el('div', 'actions');
-  const random = el('button', 'btn', 'Trộn bi');
+  if (onPhoto) {
+    const photo = el('button', 'btn', 'Ảnh');
+    photo.type = 'button';
+    photo.setAttribute('aria-label', 'Chụp hoặc chọn ảnh bàn để tự xếp bi');
+    photo.addEventListener('click', onPhoto);
+    actions.append(photo);
+  }
+  const random = el('button', 'btn', 'Trộn');
   random.type = 'button';
   random.setAttribute('aria-label', 'Xếp bi ngẫu nhiên');
   random.addEventListener('click', () => store.randomize());

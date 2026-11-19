@@ -148,10 +148,55 @@ export function findBalls(flat: Raster, scale: number, mode: GameMode, toImage?:
     const bh = y1 - y0 + 1;
     if (Math.min(bw, bh) < rPx * 1.1 && Math.max(bw, bh) > rPx * 4) continue;
     if (b.px.length / (bw * bh) < 0.3) continue;
+    // A cue lying on the table: long, and much thinner than a ball.
+    let mx = 0;
+    let my = 0;
+    for (const p of pts) (mx += p.x), (my += p.y);
+    mx /= pts.length;
+    my /= pts.length;
+    let sxx = 0;
+    let sxy = 0;
+    let syy = 0;
+    for (const p of pts) {
+      sxx += (p.x - mx) ** 2;
+      sxy += (p.x - mx) * (p.y - my);
+      syy += (p.y - my) ** 2;
+    }
+    const tr = (sxx + syy) / pts.length;
+    const det = (sxx * syy - sxy * sxy) / (pts.length * pts.length);
+    const minor = Math.sqrt(Math.max(0, tr / 2 - Math.sqrt(Math.max(0, (tr * tr) / 4 - det))));
+    if (minor < 0.3 * rPx) continue;
+    // Anything much bigger than a full rack is not balls.
+    if (b.px.length > ballArea * 14) continue;
+    // Rail, cushion face or floor showing at the edge of the flat picture: only something
+    // shaped like a single ball is kept there.
+    const major = Math.sqrt(Math.max(0, tr / 2 + Math.sqrt(Math.max(0, (tr * tr) / 4 - det))));
+    const atEdge = x0 <= 0 || y0 <= 0 || x1 >= w - 1 || y1 >= h - 1;
+    if (atEdge && !(b.px.length > 0.5 * ballArea && b.px.length < 1.7 * ballArea && minor > 0.33 * rPx && major < 0.95 * rPx)) continue;
 
-    const k = Math.max(1, Math.min(6, Math.floor(b.px.length / ballArea + 0.35)));
+    // Seen from the side, a ball's picture laid flat on the table is stretched away from the
+    // camera. The local stretch of the photo -> table mapping says by how much.
+    let stretch = 1;
+    if (toImage && fromImage) {
+      const c = toTable({ x: mx, y: my });
+      const ip = applyH(toImage, c);
+      const a = applyH(fromImage, { x: ip.x + 1, y: ip.y });
+      const d = applyH(fromImage, { x: ip.x, y: ip.y + 1 });
+      const j11 = a.x - c.x;
+      const j21 = a.y - c.y;
+      const j12 = d.x - c.x;
+      const j22 = d.y - c.y;
+      const q = j11 * j11 + j12 * j12 + j21 * j21 + j22 * j22;
+      const dt = Math.abs(j11 * j22 - j12 * j21);
+      const root = Math.sqrt(Math.max(0, q * q - 4 * dt * dt));
+      const big = Math.sqrt((q + root) / 2);
+      const small = Math.sqrt(Math.max(1e-18, (q - root) / 2));
+      stretch = Math.max(1, Math.min(6, big / small));
+    }
+    const one = ballArea * stretch;
+    const k = Math.max(1, Math.min(10, Math.floor(b.px.length / one + 0.35)));
     for (const g of k === 1 ? [pts] : split(pts, k)) {
-      if (g.length < ballArea * 0.3) continue;
+      if (g.length < one * 0.3) continue;
       let cx = 0;
       let cy = 0;
       for (const p of g) (cx += p.x), (cy += p.y);
@@ -183,7 +228,7 @@ export function findBalls(flat: Raster, scale: number, mode: GameMode, toImage?:
       // Colours from the middle of the ball only: the rim mixes with cloth and shadow.
       const rgb: number[] = [];
       for (const p of g) {
-        if ((p.x - cx) ** 2 + (p.y - cy) ** 2 > (0.85 * rPx) ** 2 && g.length < ballArea * 1.5) continue;
+        if (stretch < 1.3 && (p.x - cx) ** 2 + (p.y - cy) ** 2 > (0.85 * rPx) ** 2) continue;
         const i = (p.y * w + p.x) * 4;
         rgb.push(flat.data[i], flat.data[i + 1], flat.data[i + 2]);
       }
