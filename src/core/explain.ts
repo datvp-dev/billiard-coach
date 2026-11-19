@@ -1,5 +1,5 @@
 import { TABLE } from './config';
-import type { PocketId, SimResult, Suggestion, TipName, Vec2 } from './types';
+import type { PocketId, SimResult, Suggestion, Tip, TipName, Vec2 } from './types';
 
 const LANDSCAPE: Record<PocketId, string> = {
   BL: 'lỗ góc dưới trái',
@@ -30,14 +30,30 @@ const TIP_LABELS: Record<TipName, string> = {
   low: 'thấp',
   left: 'xoáy trái',
   right: 'xoáy phải',
+  custom: 'tự chọn',
 };
 export function tipLabel(t: TipName): string {
   return TIP_LABELS[t];
 }
 
-const POWER_LABELS = ['rất nhẹ', 'nhẹ', 'vừa', 'mạnh', 'rất mạnh'];
+/** A hand-set tip position in words; 100% is the miscue limit, half a ball radius from the centre. */
+export function describeTip(tip: Tip): string {
+  const pct = (x: number) => Math.round((Math.abs(x) / 0.5) * 20) * 5;
+  const v = pct(tip.vert);
+  const s = pct(tip.side);
+  const parts: string[] = [];
+  if (v > 0) parts.push(`${tip.vert > 0 ? 'cao' : 'thấp'} ${v}%`);
+  if (s > 0) parts.push(`${tip.side > 0 ? 'phải' : 'trái'} ${s}%`);
+  return parts.length ? parts.join(', ') : 'giữa bi';
+}
+
+const POWER_LABELS = ['rất nhẹ', 'nhẹ', 'vừa', 'hơi mạnh', 'mạnh', 'rất mạnh'];
 export function powerLabel(level: number): string {
-  return POWER_LABELS[Math.max(1, Math.min(5, Math.round(level))) - 1];
+  const p = Math.max(1, Math.min(POWER_LABELS.length, level));
+  const lo = Math.floor(p);
+  if (p - lo < 0.25) return POWER_LABELS[lo - 1];
+  if (p - lo > 0.75) return POWER_LABELS[lo];
+  return `${POWER_LABELS[lo - 1]} đến ${POWER_LABELS[lo]}`;
 }
 
 export function potLabel(p: number): 'Dễ' | 'Trung bình' | 'Khó' {
@@ -89,6 +105,11 @@ export function explain(s: Omit<Suggestion, 'text'>, nextId: number | null): str
     const tail = hidden ? `Bi ${s.targetId} bị che sau bi khác.` : `Hai bi cách nhau khoảng ${cm(apart)} cm.`;
     return `Đánh thủ: chạm ${thin} bi ${s.targetId}, lực ${power}. ${tail}`;
   }
+  const how = `Đánh ${s.tipName === 'custom' ? describeTip(s.shot.tip) : tipLabel(s.tipName)}, lực ${power}.`;
+  // Only a hand-set shot can get here with a foul or a miss; suggestions are filtered before this.
+  if (s.sim.firstContact !== s.targetId) return `${how} Bi cái không chạm bi ${s.targetId} trước: phạm lỗi.`;
+  if (s.sim.cueScratched) return `${how} Bi cái rơi lỗ: phạm lỗi.`;
+  const missed = !s.sim.pocketed.some((p) => p.id === s.targetId && p.pocket === s.pocket);
   let cueSentence: string;
   if (!c.contact || !c.end || c.travelled < 0.15) cueSentence = 'Bi cái dừng gần chỗ chạm.';
   else if (c.railsAfter > 0) cueSentence = `Bi cái chạm ${c.railsAfter} băng, đi khoảng ${cm(c.travelled)} cm.`;
@@ -96,8 +117,9 @@ export function explain(s: Omit<Suggestion, 'text'>, nextId: number | null): str
     const forward = (c.end.x - c.contact.x) * Math.cos(s.shot.dir) + (c.end.y - c.contact.y) * Math.sin(s.shot.dir) >= 0;
     cueSentence = forward ? `Bi cái lăn tới khoảng ${cm(c.travelled)} cm.` : `Bi cái lùi lại khoảng ${cm(c.travelled)} cm.`;
   }
+  if (missed) return `${how} Bi ${s.targetId} không vào lỗ. ${cueSentence}`;
   const nextSentence = nextId === null ? 'Đây là bi cuối.' : `Ra bi ${nextId}: ${posLabel(s.posQuality)}.`;
-  return `Đánh ${tipLabel(s.tipName)}, lực ${power}. ${cueSentence} ${nextSentence}`;
+  return `${how} ${cueSentence} ${nextSentence}`;
 }
 
 function thickness(s: Omit<Suggestion, 'text'>): string {

@@ -2,7 +2,7 @@ import './style.css';
 import { createCards } from './ui/cards';
 import { attachDrag } from './ui/drag';
 import { sampleAt, simDuration } from './ui/replay';
-import { createStore, loadInitial, type StorageLike } from './ui/state';
+import { activeSuggestion, createStore, loadInitial, type StorageLike } from './ui/state';
 import { computeTransform, drawTable, type TableUi, type ViewTransform } from './ui/tableView';
 import { createToolbar, createTray } from './ui/tray';
 import { createAdvisorClient } from './worker/client';
@@ -83,8 +83,7 @@ function stopReplay() {
 function startReplay(then?: () => void) {
   stopReplay();
   const s = store.get();
-  if (!s.advice || s.advice.status !== 'ok') return;
-  const sug = s.advice.suggestions[s.selected];
+  const sug = activeSuggestion(s);
   if (!sug) return;
   const start = s.layout.balls;
   const duration = simDuration(sug.sim);
@@ -118,6 +117,19 @@ const cards = createCards(cardsWrap, {
     stopReplay();
     store.undo();
   },
+  openCustom() {
+    stopReplay();
+    store.openCustom();
+  },
+  custom(patch) {
+    stopReplay();
+    store.setCustom(patch);
+  },
+  closeCustom() {
+    stopReplay();
+    store.closeCustom();
+  },
+  playCustom: () => startReplay(() => store.applyCustom()),
 });
 
 new ResizeObserver(() => {

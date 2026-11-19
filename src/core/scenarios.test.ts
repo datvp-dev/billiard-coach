@@ -20,7 +20,7 @@ test('straight-in with the next ball close by: plays it simply, not with maximum
   expect(top.kind).toBe('pot');
   expect(top.pocket).toBe('TR');
   expect(top.potProb).toBeGreaterThan(0.7);
-  expect(top.powerLevel).toBeLessThan(5);
+  expect(top.powerLevel).toBeLessThan(6);
   expect(['center', 'high', 'low']).toContain(top.tipName);
 });
 test('object ball by a side pocket, next ball at the far end: cue ball is sent to that half with a shot on it', () => {
@@ -42,7 +42,7 @@ test('two open pockets: the top suggestion uses the one that is easier to make',
 });
 test('of two shots that leave about the same position, the softer one is preferred', () => {
   const top = ok(decodeLayout('m9;0:635,635;1:1700,800;2:2100,400;3:900,300'))[0];
-  expect(top.powerLevel).toBeLessThanOrEqual(3);
+  expect(top.powerLevel).toBeLessThanOrEqual(4);
 });
 test('alternatives clearly worse than the best pot are not shown', () => {
   for (const code of ['m9;0:1500,500;9:2200,1000', 'm9;0:635,635;1:1700,800;2:2100,400;3:900,300', 'm9;0:1200,500;1:1900,635;2:600,1000']) {

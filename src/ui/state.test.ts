@@ -215,3 +215,64 @@ test('clearing, shuffling, switching mode or loading a layout starts a fresh run
     expect(store.get().steps).toBe(0);
   }
 });
+
+// --- the player's own tip position and power ---
+import { activeSuggestion } from './state';
+
+test('opening the hand-set shot starts from the selected suggestion', () => {
+  const { store, advice } = playable();
+  expect(store.get().custom).toBeNull();
+  expect(activeSuggestion(store.get())).toBe(advice.suggestions[0]);
+  store.openCustom();
+  const c = store.get().custom!;
+  expect(c.tip).toEqual(advice.suggestions[0].shot.tip);
+  expect(c.power).toBe(advice.suggestions[0].powerLevel);
+  expect(c.sug.pocket).toBe(advice.suggestions[0].pocket);
+  expect(activeSuggestion(store.get())).toBe(c.sug);
+});
+test('changing tip or power recomputes the shot and clamps the tip', () => {
+  const { store } = playable();
+  store.openCustom();
+  store.setCustom({ tip: { side: 0, vert: -0.9 } });
+  expect(store.get().custom!.tip).toEqual({ side: 0, vert: -0.5 });
+  expect(store.get().custom!.sug.shot.tip).toEqual({ side: 0, vert: -0.5 });
+  store.setCustom({ power: 4.5 });
+  expect(store.get().custom!.power).toBe(4.5);
+  expect(store.get().custom!.tip).toEqual({ side: 0, vert: -0.5 });
+  store.setCustom({ power: 99 });
+  expect(store.get().custom!.power).toBe(6);
+});
+test('closing, selecting another card, or moving a ball leaves the hand-set shot', () => {
+  const { store } = playable();
+  store.openCustom();
+  store.closeCustom();
+  expect(store.get().custom).toBeNull();
+  store.openCustom();
+  store.select(0);
+  expect(store.get().custom).toBeNull();
+  store.openCustom();
+  store.moveBall(2, v2(1.1, 0.4));
+  expect(store.get().custom).toBeNull();
+});
+test('the hand-set shot cannot be opened without a suggestion', () => {
+  const { store } = setup();
+  store.openCustom();
+  expect(store.get().custom).toBeNull();
+  store.setCustom({ power: 3 });
+  expect(store.get().custom).toBeNull();
+});
+test('playing the hand-set shot leaves the balls where its simulation put them and can be undone', () => {
+  const { store } = playable();
+  const before = store.get().layout;
+  store.openCustom();
+  store.setCustom({ tip: { side: 0, vert: -0.3 }, power: 4 });
+  const sug = store.get().custom!.sug;
+  store.applyCustom();
+  const s = store.get();
+  expect(s.custom).toBeNull();
+  expect(s.steps).toBe(1);
+  expect(s.layout.balls.find((b) => b.id === 0)!.pos).toEqual(sug.sim.final.find((b) => b.id === 0)!.pos);
+  expect(s.potted).toEqual(sug.sim.pocketed.filter((p) => p.id !== 0));
+  store.undo();
+  expect(store.get().layout).toBe(before);
+});

@@ -6,7 +6,8 @@ export type BallPos = { id: number; pos: Vec2 };
 export type Layout = { mode: GameMode; balls: BallPos[] };
 /** B/T = bottom (y=0) / top (y=W); L/R = x=0 / x=L; S = side pocket. */
 export type PocketId = 'BL' | 'BR' | 'TL' | 'TR' | 'SB' | 'ST';
-export type TipName = 'center' | 'high' | 'low' | 'left' | 'right';
+/** 'custom' is a tip position the player set by hand. */
+export type TipName = 'center' | 'high' | 'low' | 'left' | 'right' | 'custom';
 /** Tip offset as a fraction of the ball radius, each in [-0.5, 0.5]. */
 export type Tip = { side: number; vert: number };
 /** dir is in radians from +x. speed in m/s. */
@@ -38,7 +39,8 @@ export type SimResult = {
   cueTouched: number[];
   duration: number;
 };
-export type PowerLevel = 1 | 2 | 3 | 4 | 5;
+/** 1..6; suggestions use whole levels, a hand-set shot may sit halfway between two. */
+export type PowerLevel = number;
 export type Suggestion = {
   kind: 'pot' | 'safety' | 'kick';
   targetId: number;

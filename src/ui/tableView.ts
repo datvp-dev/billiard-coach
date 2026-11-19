@@ -1,7 +1,7 @@
 import { TABLE } from '../core/config';
 import { POCKET_IDS, pocketAxis, pocketCenter, targetBallId } from '../core/table';
 import type { BallPos, Suggestion, Vec2 } from '../core/types';
-import type { AppState } from './state';
+import { activeSuggestion, type AppState } from './state';
 
 export type ViewTransform = { toScreen(p: Vec2): Vec2; toTable(p: Vec2): Vec2; scale: number; portrait: boolean };
 
@@ -275,16 +275,11 @@ function drawPotted(ctx: CanvasRenderingContext2D, t: ViewTransform, s: AppState
   }
 }
 
-function selectedSuggestion(s: AppState): Suggestion | null {
-  if (!s.advice || s.advice.status !== 'ok') return null;
-  return s.advice.suggestions[s.selected] ?? null;
-}
-
 function drawScene(ctx: CanvasRenderingContext2D, t: ViewTransform, s: AppState, ui: TableUi) {
   drawBed(ctx, t);
   drawPotted(ctx, t, s);
   const replaying = !!ui.replay;
-  const sug = selectedSuggestion(s);
+  const sug = activeSuggestion(s);
   if (sug && !ui.drag && !replaying) drawOverlay(ctx, t, sug);
   const balls = ui.replay ?? s.layout.balls;
   const target = targetBallId(s.layout);

@@ -42,10 +42,13 @@ export const PHYS = {
   sampleEvery: 0.01,
 };
 
-/** m/s for power level 1..5. */
-export const POWER_SPEEDS = [0.6, 1.1, 1.8, 2.9, 4.5] as const;
+/**
+ * m/s for power level 1..6. They follow Dr. Dave's shot-speed names: soft touch (under 1 mph),
+ * slow (1-2), medium (2-4, two levels), fast (4-7) and power (7-10).
+ */
+export const POWER_SPEEDS = [0.35, 0.6, 1.1, 1.8, 2.9, 4.5] as const;
 
-export const TIPS: Record<TipName, Tip> = {
+export const TIPS: Record<Exclude<TipName, 'custom'>, Tip> = {
   center: { side: 0, vert: 0 },
   high: { side: 0, vert: 0.4 },
   low: { side: 0, vert: -0.4 },

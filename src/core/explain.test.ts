@@ -15,7 +15,8 @@ test('pocket names follow the table when it is drawn rotated a quarter turn cloc
   expect(names).toEqual(['lỗ góc trên trái', 'lỗ góc dưới trái', 'lỗ góc trên phải', 'lỗ góc dưới phải', 'lỗ giữa trái', 'lỗ giữa phải']);
 });
 test('labels and thresholds', () => {
-  expect([1, 2, 3, 4, 5].map(powerLabel)).toEqual(['rất nhẹ', 'nhẹ', 'vừa', 'mạnh', 'rất mạnh']);
+  expect([1, 2, 3, 4, 5, 6].map(powerLabel)).toEqual(['rất nhẹ', 'nhẹ', 'vừa', 'hơi mạnh', 'mạnh', 'rất mạnh']);
+  expect(powerLabel(2.5)).toBe('nhẹ đến vừa');
   expect(tipLabel('center')).toBe('giữa bi');
   expect(tipLabel('left')).toBe('xoáy trái');
   expect(potLabel(0.7)).toBe('Dễ');

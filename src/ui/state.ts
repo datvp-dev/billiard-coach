@@ -1,6 +1,8 @@
+import { POWER_SPEEDS } from '../core/config';
 import { decodeLayout, encodeLayout, randomLayout } from '../core/layoutCodec';
 import { ballIdsForMode, placeBall } from '../core/table';
-import type { AdviceResult, ClothSpeed, GameMode, Layout, PocketId, Vec2 } from '../core/types';
+import { clampTip, customShot } from '../core/custom';
+import type { AdviceResult, ClothSpeed, GameMode, Layout, PocketId, Suggestion, Tip, Vec2 } from '../core/types';
 import type { AdvisorClient } from '../worker/client';
 
 export type Potted = { id: number; pocket: PocketId };
@@ -14,7 +16,16 @@ export type AppState = {
   potted: Potted[];
   /** How many played shots can be undone. */
   steps: number;
+  /** The player's own tip position and power, tried on the line of the selected suggestion. */
+  custom: { base: Suggestion; tip: Tip; power: number; sug: Suggestion } | null;
 };
+
+/** The shot drawn on the table: the hand-set one while it is open, otherwise the selected suggestion. */
+export function activeSuggestion(s: AppState): Suggestion | null {
+  if (s.custom) return s.custom.sug;
+  if (!s.advice || s.advice.status !== 'ok') return null;
+  return s.advice.suggestions[s.selected] ?? null;
+}
 
 export type Store = {
   get(): AppState;
@@ -30,6 +41,12 @@ export type Store = {
   applySuggestion(i: number): void;
   /** Go back to the position before the last played shot. */
   undo(): void;
+  /** Start a hand-set shot from the selected suggestion's tip and power. */
+  openCustom(): void;
+  setCustom(patch: { tip?: Tip; power?: number }): void;
+  closeCustom(): void;
+  /** Play the hand-set shot, fouls and misses included. */
+  applyCustom(): void;
   clear(): void;
   randomize(): void;
   /** Result from the advisor; ignored unless it was computed for the current layout. */
@@ -74,7 +91,7 @@ export function createStore(
   client: AdvisorClient,
   env: { storage: StorageLike | null; initial: { layout: Layout; cloth: ClothSpeed }; setHash?: (code: string) => void },
 ): Store {
-  let state: AppState = { layout: env.initial.layout, cloth: env.initial.cloth, advice: null, selected: 0, computing: true, potted: [], steps: 0 };
+  let state: AppState = { layout: env.initial.layout, cloth: env.initial.cloth, advice: null, selected: 0, computing: true, potted: [], steps: 0, custom: null };
   let history: { layout: Layout; potted: Potted[] }[] = [];
   const subs = new Set<(s: AppState) => void>();
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -101,7 +118,7 @@ export function createStore(
     client.request(state.layout, { cloth: state.cloth });
   };
   const changed = (layout: Layout, cloth = state.cloth, potted: Potted[] = state.potted) => {
-    state = { layout, cloth, advice: null, selected: 0, computing: true, potted, steps: history.length };
+    state = { layout, cloth, advice: null, selected: 0, computing: true, potted, steps: history.length, custom: null };
     if (timer !== null) clearTimeout(timer);
     timer = setTimeout(() => requestNow(), DEBOUNCE_MS);
     emit();
@@ -111,6 +128,19 @@ export function createStore(
   const fresh = (layout: Layout) => {
     history = [];
     changed(layout, state.cloth, []);
+  };
+
+  const play = (sug: Suggestion) => {
+    history.push({ layout: state.layout, potted: state.potted });
+    const balls = sug.sim.final.map((b) => ({ id: b.id, pos: { x: b.pos.x, y: b.pos.y } })).sort((a, b) => a.id - b.id);
+    const sunk = sug.sim.pocketed.filter((p) => p.id !== 0 && !state.potted.some((q) => q.id === p.id));
+    changed({ mode: state.layout.mode, balls }, state.cloth, [...state.potted, ...sunk]);
+  };
+  const setCustomShot = (base: Suggestion, tipWanted: Tip, powerWanted: number) => {
+    const tip = clampTip(tipWanted);
+    const power = Math.max(1, Math.min(POWER_SPEEDS.length, powerWanted));
+    state = { ...state, custom: { base, tip, power, sug: customShot(state.layout, base, tip, power, state.cloth) } };
+    emit();
   };
 
   const defaultSpot = (id: number): Vec2 => (id === 0 ? { x: 0.635, y: 0.635 } : { x: 1.2 + (id - 1) * 0.07, y: 0.635 });
@@ -145,7 +175,7 @@ export function createStore(
       if (c !== state.cloth) changed(state.layout, c);
     },
     select(i) {
-      state = { ...state, selected: i };
+      state = { ...state, selected: i, custom: null };
       emit();
     },
     clear: () => fresh({ mode: state.layout.mode, balls: [] }),
@@ -153,11 +183,23 @@ export function createStore(
     applySuggestion(i) {
       if (!state.advice || state.advice.status !== 'ok') return;
       const sug = state.advice.suggestions[i];
-      if (!sug) return;
-      history.push({ layout: state.layout, potted: state.potted });
-      const balls = sug.sim.final.map((b) => ({ id: b.id, pos: { x: b.pos.x, y: b.pos.y } })).sort((a, b) => a.id - b.id);
-      const sunk = sug.sim.pocketed.filter((p) => p.id !== 0 && !state.potted.some((q) => q.id === p.id));
-      changed({ mode: state.layout.mode, balls }, state.cloth, [...state.potted, ...sunk]);
+      if (sug) play(sug);
+    },
+    openCustom() {
+      const base = activeSuggestion({ ...state, custom: null });
+      if (base) setCustomShot(base, base.shot.tip, base.powerLevel);
+    },
+    setCustom(patch) {
+      const c = state.custom;
+      if (c) setCustomShot(c.base, patch.tip ?? c.tip, patch.power ?? c.power);
+    },
+    closeCustom() {
+      if (!state.custom) return;
+      state = { ...state, custom: null };
+      emit();
+    },
+    applyCustom() {
+      if (state.custom) play(state.custom.sug);
     },
     undo() {
       const prev = history.pop();

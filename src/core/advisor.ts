@@ -9,12 +9,13 @@ import { angleOf, dist, sub } from './vec';
 export type AdviseOptions = { cloth: ClothSpeed };
 
 const { L, W, R } = TABLE;
-const LEVELS: PowerLevel[] = [1, 2, 3, 4, 5];
+const LEVELS: PowerLevel[] = [1, 2, 3, 4, 5, 6];
 const PERTURB = [0.9, 1.1];
 /** Only the most promising candidates get the extra speed-perturbed runs. */
 const MAX_REFINED = 12;
 
 type Draft = Omit<Suggestion, 'text'>;
+type PresetTip = Exclude<TipName, 'custom'>;
 
 function cuePos(sim: SimResult): Vec2 | null {
   const c = sim.final.find((b) => b.id === 0);
@@ -22,7 +23,7 @@ function cuePos(sim: SimResult): Vec2 | null {
 }
 
 /** Quality of the leave: best pot chance on the next ball from where everything stopped. */
-function leaveQuality(sim: SimResult, mode: Layout['mode'], targetId: number, pocket: PocketId): number {
+export function leaveQuality(sim: SimResult, mode: Layout['mode'], targetId: number, pocket: PocketId): number {
   if (sim.cueScratched) return 0;
   if (!sim.pocketed.some((p) => p.id === targetId && p.pocket === pocket)) return 0;
   const after: Layout = { mode, balls: sim.final };
@@ -35,7 +36,7 @@ function nearRail(p: Vec2): boolean {
   return p.x < 1.5 * R || p.x > L - 1.5 * R || p.y < 1.5 * R || p.y > W - 1.5 * R;
 }
 
-function potCandidates(layout: Layout, targetId: number, tips: TipName[], cloth: ClothSpeed): Draft[] {
+function potCandidates(layout: Layout, targetId: number, tips: PresetTip[], cloth: ClothSpeed): Draft[] {
   const cue = layout.balls.find((b) => b.id === 0)!.pos;
   const obj = layout.balls.find((b) => b.id === targetId)!.pos;
   const isLast = nextBallId(layout, targetId) === null;
@@ -92,9 +93,9 @@ function potCandidates(layout: Layout, targetId: number, tips: TipName[], cloth:
     d.posQuality = isLast && !scratchRisk ? 1 : qSum / (1 + PERTURB.length);
     let score = d.potProb * (SCORE.wPot + SCORE.wPos * d.posQuality);
     if (d.tipName === 'center') score += SCORE.bonusCenter;
-    if (d.powerLevel === 2 || d.powerLevel === 3) score += SCORE.bonusMidPower;
-    if (d.powerLevel === 4) score -= SCORE.penHighPower;
-    if (d.powerLevel === 5) score -= SCORE.penMaxPower;
+    if (d.powerLevel === 3 || d.powerLevel === 4) score += SCORE.bonusMidPower;
+    if (d.powerLevel === 5) score -= SCORE.penHighPower;
+    if (d.powerLevel === 6) score -= SCORE.penMaxPower;
     if (d.tipName === 'left' || d.tipName === 'right') score -= SCORE.penSide;
     if (d.sim.cueTouched.length > 1) score -= SCORE.penExtraContact;
     if (nearRail(d.stopZone[0])) score -= SCORE.penNearRail;
@@ -131,7 +132,7 @@ function bestSafety(layout: Layout, targetId: number, cloth: ClothSpeed): Draft 
   for (const f of SAFETY_FULLNESS) {
     const aim = { x: obj.x + px * f * 2 * R, y: obj.y + py * f * 2 * R };
     const dir = angleOf(sub(aim, cue));
-    for (const powerLevel of [1, 2, 3] as PowerLevel[]) {
+    for (const powerLevel of [1, 2, 3, 4] as PowerLevel[]) {
       const shot: Shot = { dir, speed: POWER_SPEEDS[powerLevel - 1], tip: TIPS.center };
       const sim = simulate(layout.balls, shot, { cloth });
       if (sim.firstContact !== targetId || sim.cueScratched) continue;
@@ -169,7 +170,7 @@ function bestKick(layout: Layout, targetId: number, cloth: ClothSpeed): Draft | 
   const cue = layout.balls.find((b) => b.id === 0)!.pos;
   const STEP = 1;
   let best: { level: PowerLevel; rails: number; width: number; mid: number } | null = null;
-  for (const level of [3, 2] as PowerLevel[]) {
+  for (const level of [4, 3] as PowerLevel[]) {
     const speed = POWER_SPEEDS[level - 1];
     const rails: number[] = [];
     for (let a = 0; a < 360; a += STEP) {
