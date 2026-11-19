@@ -25,9 +25,9 @@ export function createToolbar(root: HTMLElement, store: Store): { update(s: AppS
   });
 
   const clothWrap = el('label', 'cloth');
-  clothWrap.append(el('span', '', 'Nỉ'));
+  clothWrap.setAttribute('aria-label', 'Tốc độ nỉ');
   const cloth = el('select');
-  for (const [v, label] of [['fast', 'Nhanh'], ['medium', 'Vừa'], ['slow', 'Chậm']] as [ClothSpeed, string][]) {
+  for (const [v, label] of [['fast', 'Nỉ nhanh'], ['medium', 'Nỉ vừa'], ['slow', 'Nỉ chậm']] as [ClothSpeed, string][]) {
     const o = el('option', '', label);
     o.value = v;
     cloth.append(o);
@@ -36,11 +36,13 @@ export function createToolbar(root: HTMLElement, store: Store): { update(s: AppS
   clothWrap.append(cloth);
 
   const actions = el('div', 'actions');
-  const random = el('button', 'btn', 'Ngẫu nhiên');
+  const random = el('button', 'btn', 'Trộn bi');
   random.type = 'button';
+  random.setAttribute('aria-label', 'Xếp bi ngẫu nhiên');
   random.addEventListener('click', () => store.randomize());
-  const clear = el('button', 'btn', 'Xóa bàn');
+  const clear = el('button', 'btn', 'Xóa');
   clear.type = 'button';
+  clear.setAttribute('aria-label', 'Xóa bàn');
   clear.addEventListener('click', () => store.clear());
   const share = el('button', 'btn', 'Chia sẻ');
   share.type = 'button';

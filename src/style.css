@@ -33,19 +33,19 @@ button, select { font: inherit; color: inherit; }
   grid-area: bar;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
+  gap: 4px;
+  padding: 6px 6px;
   overflow-x: auto;
   scrollbar-width: none;
 }
 .bar::-webkit-scrollbar, .tray::-webkit-scrollbar, .cards::-webkit-scrollbar { display: none; }
 .seg { display: flex; flex: none; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
-.seg-btn { min-height: 40px; padding: 0 12px; border: 0; background: transparent; color: var(--muted); font-weight: 600; white-space: nowrap; }
+.seg-btn { min-height: 40px; padding: 0 9px; font-size: 14px; border: 0; background: transparent; color: var(--muted); font-weight: 600; white-space: nowrap; }
 .seg-btn[aria-pressed='true'] { background: var(--accent); color: #1a1505; }
 .cloth { display: flex; flex: none; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; }
-.cloth select { min-height: 40px; padding: 0 8px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); }
+.cloth select { min-height: 40px; padding: 0 4px; font-size: 14px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); }
 .actions { display: flex; flex: none; gap: 6px; margin-left: auto; }
-.btn { min-height: 40px; padding: 0 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); white-space: nowrap; }
+.btn { min-height: 40px; padding: 0 9px; font-size: 14px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); white-space: nowrap; }
 .btn:active, .tray-ball:active { transform: scale(0.96); }
 
 .stage { grid-area: stage; position: relative; min-height: 0; min-width: 0; }
@@ -76,7 +76,8 @@ button, select { font: inherit; color: inherit; }
 .tray-ball[aria-pressed='false'] .dot { opacity: 0.28; }
 .tray-ball[aria-pressed='true'] .dot { outline: 2px solid rgba(255, 255, 255, 0.55); outline-offset: 1px; }
 
-.cards-wrap { grid-area: cards; min-width: 0; background: var(--panel); border-top: 1px solid var(--line); }
+/* Fixed height on phones: the table must not resize when cards come and go mid-drag. */
+.cards-wrap { grid-area: cards; min-width: 0; height: 216px; overflow-y: auto; background: var(--panel); border-top: 1px solid var(--line); }
 .cards {
   display: flex;
   gap: 8px;
@@ -122,7 +123,7 @@ button, select { font: inherit; color: inherit; }
     grid-template-rows: auto minmax(0, 1fr) auto;
     grid-template-areas: 'bar cards' 'stage cards' 'tray cards';
   }
-  .cards-wrap { border-top: 0; border-left: 1px solid var(--line); overflow-y: auto; }
+  .cards-wrap { height: auto; border-top: 0; border-left: 1px solid var(--line); overflow-y: auto; }
   .cards { flex-direction: column; overflow: visible; padding: 10px; }
   .card { width: auto; }
 }

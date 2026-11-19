@@ -1,5 +1,7 @@
 import './style.css';
+import { createCards } from './ui/cards';
 import { attachDrag } from './ui/drag';
+import { sampleAt, simDuration } from './ui/replay';
 import { createStore, loadInitial, type StorageLike } from './ui/state';
 import { computeTransform, drawTable, type TableUi, type ViewTransform } from './ui/tableView';
 import { createToolbar, createTray } from './ui/tray';
@@ -63,14 +65,63 @@ function resize() {
   redraw();
 }
 
-new ResizeObserver(resize).observe(stage);
-attachDrag(canvas, trayEl, () => transform, store, ui, redraw, () => {});
+// --- Shot replay ---
+const MAX_REPLAY_MS = 6000;
+const HOLD_MS = 700;
+let replayFrame = 0;
 
+function stopReplay() {
+  if (replayFrame) cancelAnimationFrame(replayFrame);
+  replayFrame = 0;
+  if (ui.replay) {
+    ui.replay = null;
+    redraw();
+  }
+}
+
+function startReplay() {
+  stopReplay();
+  const s = store.get();
+  if (!s.advice || s.advice.status !== 'ok') return;
+  const sug = s.advice.suggestions[s.selected];
+  if (!sug) return;
+  const start = s.layout.balls;
+  const duration = simDuration(sug.sim);
+  const rate = Math.max(1, (duration * 1000) / MAX_REPLAY_MS);
+  const t0 = performance.now();
+  const frame = (now: number) => {
+    const t = ((now - t0) / 1000) * rate;
+    ui.replay = sampleAt(sug.sim, start, t);
+    redraw();
+    if (t < duration + (HOLD_MS / 1000) * rate) replayFrame = requestAnimationFrame(frame);
+    else stopReplay();
+  };
+  replayFrame = requestAnimationFrame(frame);
+}
+
+const cards = createCards(cardsWrap, (i) => {
+  stopReplay();
+  store.select(i);
+}, startReplay);
+
+new ResizeObserver(() => {
+  resize();
+  cards.update(store.get(), transform.portrait);
+}).observe(stage);
+attachDrag(canvas, trayEl, () => transform, store, ui, redraw, stopReplay);
+
+let lastLayout = store.get().layout;
 store.subscribe((s) => {
+  if (s.layout !== lastLayout) {
+    lastLayout = s.layout;
+    stopReplay();
+  }
   toolbar.update(s);
   tray.update(s);
+  cards.update(s, transform.portrait);
   redraw();
 });
 toolbar.update(store.get());
 tray.update(store.get());
 resize();
+cards.update(store.get(), transform.portrait);
