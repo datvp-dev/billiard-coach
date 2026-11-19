@@ -1,0 +1,134 @@
+import { decodeLayout, encodeLayout, randomLayout } from '../core/layoutCodec';
+import { ballIdsForMode, placeBall } from '../core/table';
+import type { AdviceResult, ClothSpeed, GameMode, Layout, Vec2 } from '../core/types';
+import type { AdvisorClient } from '../worker/client';
+
+export type AppState = { layout: Layout; cloth: ClothSpeed; advice: AdviceResult | null; selected: number; computing: boolean };
+
+export type Store = {
+  get(): AppState;
+  subscribe(fn: (s: AppState) => void): () => void;
+  /** Replace the whole layout (also the hook for photo import). */
+  setLayout(l: Layout): void;
+  moveBall(id: number, wanted: Vec2): void;
+  toggleBall(id: number): void;
+  setMode(m: GameMode): void;
+  setCloth(c: ClothSpeed): void;
+  select(i: number): void;
+  clear(): void;
+  randomize(): void;
+  /** Result from the advisor; ignored unless it was computed for the current layout. */
+  receive(r: AdviceResult, layout: Layout): void;
+};
+
+export type StorageLike = { getItem(k: string): string | null; setItem(k: string, v: string): void };
+
+export const STORAGE_KEY = 'billiard-coach:v1';
+export const SAMPLE_LAYOUT = 'm9;0:635,635;1:1700,800;2:2100,400;3:900,300';
+const DEBOUNCE_MS = 150;
+const CLOTHS: ClothSpeed[] = ['fast', 'medium', 'slow'];
+
+/** URL hash first, then what was saved on this device, then a sample position. Never throws. */
+export function loadInitial(hash: string, storage: StorageLike | null): { layout: Layout; cloth: ClothSpeed } {
+  let cloth: ClothSpeed = 'medium';
+  let saved: Layout | null = null;
+  try {
+    const raw = storage?.getItem(STORAGE_KEY);
+    if (raw) {
+      const o = JSON.parse(raw);
+      if (CLOTHS.includes(o?.cloth)) cloth = o.cloth;
+      if (typeof o?.layout === 'string') {
+        const l = decodeLayout(o.layout);
+        if (l.balls.length > 0) saved = l;
+      }
+    }
+  } catch {
+    // unreadable storage: fall through to the sample
+  }
+  let fromHash: Layout | null = null;
+  try {
+    const l = decodeLayout(decodeURIComponent(hash.replace(/^#/, '')));
+    if (l.balls.length > 0) fromHash = l;
+  } catch {
+    // malformed escape sequence in the URL
+  }
+  return { layout: fromHash ?? saved ?? decodeLayout(SAMPLE_LAYOUT), cloth };
+}
+
+export function createStore(
+  client: AdvisorClient,
+  env: { storage: StorageLike | null; initial: { layout: Layout; cloth: ClothSpeed }; setHash?: (code: string) => void },
+): Store {
+  let state: AppState = { layout: env.initial.layout, cloth: env.initial.cloth, advice: null, selected: 0, computing: true };
+  const subs = new Set<(s: AppState) => void>();
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  const emit = () => subs.forEach((fn) => fn(state));
+  const persist = () => {
+    const code = encodeLayout(state.layout);
+    try {
+      env.storage?.setItem(STORAGE_KEY, JSON.stringify({ layout: code, cloth: state.cloth }));
+    } catch {
+      // storage full or blocked: the position still lives in the URL
+    }
+    env.setHash?.(code);
+  };
+  const requestNow = () => {
+    timer = null;
+    client.request(state.layout, { cloth: state.cloth });
+  };
+  const changed = (layout: Layout, cloth = state.cloth) => {
+    state = { layout, cloth, advice: null, selected: 0, computing: true };
+    persist();
+    if (timer !== null) clearTimeout(timer);
+    timer = setTimeout(requestNow, DEBOUNCE_MS);
+    emit();
+  };
+
+  const defaultSpot = (id: number): Vec2 => (id === 0 ? { x: 0.635, y: 0.635 } : { x: 1.2 + (id - 1) * 0.07, y: 0.635 });
+
+  const store: Store = {
+    get: () => state,
+    subscribe(fn) {
+      subs.add(fn);
+      return () => void subs.delete(fn);
+    },
+    setLayout: (l) => changed(l),
+    moveBall(id, wanted) {
+      if (!state.layout.balls.some((b) => b.id === id)) return;
+      const pos = placeBall(state.layout, id, wanted);
+      changed({ mode: state.layout.mode, balls: state.layout.balls.map((b) => (b.id === id ? { id, pos } : b)) });
+    },
+    toggleBall(id) {
+      if (!ballIdsForMode(state.layout.mode).includes(id)) return;
+      const { mode, balls } = state.layout;
+      if (balls.some((b) => b.id === id)) changed({ mode, balls: balls.filter((b) => b.id !== id) });
+      else {
+        const pos = placeBall(state.layout, id, defaultSpot(id));
+        changed({ mode, balls: [...balls, { id, pos }].sort((a, b) => a.id - b.id) });
+      }
+    },
+    setMode(mode) {
+      if (mode === state.layout.mode) return;
+      const allowed = ballIdsForMode(mode);
+      changed({ mode, balls: state.layout.balls.filter((b) => allowed.includes(b.id)) });
+    },
+    setCloth(c) {
+      if (c !== state.cloth) changed(state.layout, c);
+    },
+    select(i) {
+      state = { ...state, selected: i };
+      emit();
+    },
+    clear: () => changed({ mode: state.layout.mode, balls: [] }),
+    randomize: () => changed(randomLayout(state.layout.mode)),
+    receive(r, layout) {
+      if (encodeLayout(layout) !== encodeLayout(state.layout) || timer !== null) return;
+      state = { ...state, advice: r, selected: 0, computing: false };
+      emit();
+    },
+  };
+
+  requestNow();
+  return store;
+}
