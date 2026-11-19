@@ -114,9 +114,9 @@ function drawBed(ctx: CanvasRenderingContext2D, t: ViewTransform) {
   }
 }
 
-function drawBall(ctx: CanvasRenderingContext2D, t: ViewTransform, b: BallPos, alpha = 1) {
+function drawBall(ctx: CanvasRenderingContext2D, t: ViewTransform, b: BallPos, alpha = 1, size = 1) {
   const p = t.toScreen(b.pos);
-  const r = R * t.scale;
+  const r = R * t.scale * size;
   const { fill, stripe } = ballColor(b.id);
   ctx.save();
   ctx.globalAlpha = alpha;
@@ -259,6 +259,22 @@ function drawOverlay(ctx: CanvasRenderingContext2D, t: ViewTransform, s: Suggest
   ctx.restore();
 }
 
+/** Balls already pocketed in this run rest in the pocket they went into. */
+function drawPotted(ctx: CanvasRenderingContext2D, t: ViewTransform, s: AppState) {
+  for (const id of POCKET_IDS) {
+    const here = s.potted.filter((p) => p.pocket === id);
+    if (here.length === 0) continue;
+    const side = id === 'SB' || id === 'ST';
+    const c = pocketCenter(id);
+    const a = pocketAxis(id);
+    const off = side ? 0.04 : 0.022;
+    here.forEach((p, k) => {
+      const shift = (k - (here.length - 1) / 2) * 0.034;
+      drawBall(ctx, t, { id: p.id, pos: { x: c.x + a.x * off - a.y * shift, y: c.y + a.y * off + a.x * shift } }, 0.92, 0.8);
+    });
+  }
+}
+
 function selectedSuggestion(s: AppState): Suggestion | null {
   if (!s.advice || s.advice.status !== 'ok') return null;
   return s.advice.suggestions[s.selected] ?? null;
@@ -266,6 +282,7 @@ function selectedSuggestion(s: AppState): Suggestion | null {
 
 function drawScene(ctx: CanvasRenderingContext2D, t: ViewTransform, s: AppState, ui: TableUi) {
   drawBed(ctx, t);
+  drawPotted(ctx, t, s);
   const replaying = !!ui.replay;
   const sug = selectedSuggestion(s);
   if (sug && !ui.drag && !replaying) drawOverlay(ctx, t, sug);

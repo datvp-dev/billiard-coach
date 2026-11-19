@@ -145,3 +145,73 @@ test('a throwing history or storage does not stop redraws or advice', () => {
   expect(requests).toHaveLength(2);
   expect(encodeLayout(requests[1])).toBe('m9;0:635,635;1:1000,500');
 });
+
+// --- playing a suggestion and stepping through a run-out ---
+import { advise } from '../core/advisor';
+
+const playable = () => {
+  const s = setup('m9;0:1900,800;1:2250,1030;2:1000,400');
+  vi.advanceTimersByTime(200);
+  const advice = advise(s.requests[0], { cloth: 'medium' });
+  s.store.receive(advice, s.requests[0]);
+  if (advice.status !== 'ok') throw new Error('expected advice');
+  return { ...s, advice };
+};
+
+test('playing a suggestion moves the cue ball to where it stops, leaves the potted ball in its pocket, and asks for the next ball', () => {
+  const { store, advice, requests } = playable();
+  const sug = advice.suggestions[0];
+  store.applySuggestion(0);
+  const st = store.get();
+  expect(st.layout.balls.map((b) => b.id)).toEqual([0, 2]);
+  const cueEnd = sug.sim.final.find((b) => b.id === 0)!.pos;
+  expect(st.layout.balls[0].pos.x).toBeCloseTo(cueEnd.x, 6);
+  expect(st.layout.balls[0].pos.y).toBeCloseTo(cueEnd.y, 6);
+  expect(st.potted).toEqual([{ id: 1, pocket: 'TR' }]);
+  expect(st.steps).toBe(1);
+  expect(st.advice).toBeNull();
+  vi.advanceTimersByTime(150);
+  expect(requests[requests.length - 1].balls.map((b) => b.id)).toEqual([0, 2]);
+});
+test('undo returns to the position before the shot so another option can be chosen', () => {
+  const { store } = playable();
+  const before = encodeLayout(store.get().layout);
+  store.applySuggestion(0);
+  store.undo();
+  expect(encodeLayout(store.get().layout)).toBe(before);
+  expect(store.get().potted).toEqual([]);
+  expect(store.get().steps).toBe(0);
+  store.undo(); // nothing left to undo: no-op
+  expect(encodeLayout(store.get().layout)).toBe(before);
+});
+test('applySuggestion without advice, or with a bad index, does nothing', () => {
+  const { store } = setup();
+  store.applySuggestion(0);
+  expect(store.get().steps).toBe(0);
+  const p = playable();
+  p.store.applySuggestion(7);
+  expect(p.store.get().steps).toBe(0);
+});
+test('putting a potted ball back on the table takes it out of the pocket', () => {
+  const { store } = playable();
+  store.applySuggestion(0);
+  store.toggleBall(1);
+  expect(store.get().potted).toEqual([]);
+  expect(store.get().layout.balls.map((b) => b.id)).toEqual([0, 1, 2]);
+});
+test('dragging a ball mid run keeps the potted balls and the ability to undo', () => {
+  const { store } = playable();
+  store.applySuggestion(0);
+  store.moveBall(2, v2(1.1, 0.5));
+  expect(store.get().potted).toHaveLength(1);
+  expect(store.get().steps).toBe(1);
+});
+test('clearing, shuffling, switching mode or loading a layout starts a fresh run', () => {
+  for (const reset of [(s: ReturnType<typeof playable>['store']) => s.clear(), (s: ReturnType<typeof playable>['store']) => s.randomize(), (s: ReturnType<typeof playable>['store']) => s.setMode('10'), (s: ReturnType<typeof playable>['store']) => s.setLayout(decodeLayout('m9;0:500,500;3:900,900'))]) {
+    const { store } = playable();
+    store.applySuggestion(0);
+    reset(store);
+    expect(store.get().potted).toEqual([]);
+    expect(store.get().steps).toBe(0);
+  }
+});

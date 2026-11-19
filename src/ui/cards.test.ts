@@ -15,3 +15,8 @@ test('status messages', () => {
   expect(statusMessage({ status: 'ok', targetId: 1, suggestions: [] }, false)).toBe('Không tìm được cú đánh hợp lệ. Thử chỉnh lại vị trí bi.');
   expect(statusMessage({ status: 'ok', targetId: 1, suggestions: [{} as Suggestion] }, false)).toBeNull();
 });
+
+test('after the last ball is played the status says the table is cleared', () => {
+  expect(statusMessage({ status: 'no-target' }, false, 2)).toBe('Đã ăn hết bi. Bấm "Chọn lại" để thử cách đánh khác.');
+  expect(statusMessage({ status: 'no-target' }, false, 0)).toBe('Đặt ít nhất một bi số lên bàn.');
+});

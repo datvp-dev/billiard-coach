@@ -1,9 +1,20 @@
 import { decodeLayout, encodeLayout, randomLayout } from '../core/layoutCodec';
 import { ballIdsForMode, placeBall } from '../core/table';
-import type { AdviceResult, ClothSpeed, GameMode, Layout, Vec2 } from '../core/types';
+import type { AdviceResult, ClothSpeed, GameMode, Layout, PocketId, Vec2 } from '../core/types';
 import type { AdvisorClient } from '../worker/client';
 
-export type AppState = { layout: Layout; cloth: ClothSpeed; advice: AdviceResult | null; selected: number; computing: boolean };
+export type Potted = { id: number; pocket: PocketId };
+export type AppState = {
+  layout: Layout;
+  cloth: ClothSpeed;
+  advice: AdviceResult | null;
+  selected: number;
+  computing: boolean;
+  /** Balls pocketed by shots played in this run, shown resting in their pockets. */
+  potted: Potted[];
+  /** How many played shots can be undone. */
+  steps: number;
+};
 
 export type Store = {
   get(): AppState;
@@ -15,6 +26,10 @@ export type Store = {
   setMode(m: GameMode): void;
   setCloth(c: ClothSpeed): void;
   select(i: number): void;
+  /** Play suggestion i: balls go where the simulation left them and advice is requested for the next ball. */
+  applySuggestion(i: number): void;
+  /** Go back to the position before the last played shot. */
+  undo(): void;
   clear(): void;
   randomize(): void;
   /** Result from the advisor; ignored unless it was computed for the current layout. */
@@ -59,7 +74,8 @@ export function createStore(
   client: AdvisorClient,
   env: { storage: StorageLike | null; initial: { layout: Layout; cloth: ClothSpeed }; setHash?: (code: string) => void },
 ): Store {
-  let state: AppState = { layout: env.initial.layout, cloth: env.initial.cloth, advice: null, selected: 0, computing: true };
+  let state: AppState = { layout: env.initial.layout, cloth: env.initial.cloth, advice: null, selected: 0, computing: true, potted: [], steps: 0 };
+  let history: { layout: Layout; potted: Potted[] }[] = [];
   const subs = new Set<(s: AppState) => void>();
   let timer: ReturnType<typeof setTimeout> | null = null;
 
@@ -84,11 +100,17 @@ export function createStore(
     if (save) persist();
     client.request(state.layout, { cloth: state.cloth });
   };
-  const changed = (layout: Layout, cloth = state.cloth) => {
-    state = { layout, cloth, advice: null, selected: 0, computing: true };
+  const changed = (layout: Layout, cloth = state.cloth, potted: Potted[] = state.potted) => {
+    state = { layout, cloth, advice: null, selected: 0, computing: true, potted, steps: history.length };
     if (timer !== null) clearTimeout(timer);
     timer = setTimeout(() => requestNow(), DEBOUNCE_MS);
     emit();
+  };
+
+  /** A new position from outside the current run: nothing is potted and there is nothing to undo. */
+  const fresh = (layout: Layout) => {
+    history = [];
+    changed(layout, state.cloth, []);
   };
 
   const defaultSpot = (id: number): Vec2 => (id === 0 ? { x: 0.635, y: 0.635 } : { x: 1.2 + (id - 1) * 0.07, y: 0.635 });
@@ -99,7 +121,7 @@ export function createStore(
       subs.add(fn);
       return () => void subs.delete(fn);
     },
-    setLayout: (l) => changed(l),
+    setLayout: (l) => fresh(l),
     moveBall(id, wanted) {
       if (!state.layout.balls.some((b) => b.id === id)) return;
       const pos = placeBall(state.layout, id, wanted);
@@ -111,13 +133,13 @@ export function createStore(
       if (balls.some((b) => b.id === id)) changed({ mode, balls: balls.filter((b) => b.id !== id) });
       else {
         const pos = placeBall(state.layout, id, defaultSpot(id));
-        changed({ mode, balls: [...balls, { id, pos }].sort((a, b) => a.id - b.id) });
+        changed({ mode, balls: [...balls, { id, pos }].sort((a, b) => a.id - b.id) }, state.cloth, state.potted.filter((p) => p.id !== id));
       }
     },
     setMode(mode) {
       if (mode === state.layout.mode) return;
       const allowed = ballIdsForMode(mode);
-      changed({ mode, balls: state.layout.balls.filter((b) => allowed.includes(b.id)) });
+      fresh({ mode, balls: state.layout.balls.filter((b) => allowed.includes(b.id)) });
     },
     setCloth(c) {
       if (c !== state.cloth) changed(state.layout, c);
@@ -126,8 +148,21 @@ export function createStore(
       state = { ...state, selected: i };
       emit();
     },
-    clear: () => changed({ mode: state.layout.mode, balls: [] }),
-    randomize: () => changed(randomLayout(state.layout.mode)),
+    clear: () => fresh({ mode: state.layout.mode, balls: [] }),
+    randomize: () => fresh(randomLayout(state.layout.mode)),
+    applySuggestion(i) {
+      if (!state.advice || state.advice.status !== 'ok') return;
+      const sug = state.advice.suggestions[i];
+      if (!sug) return;
+      history.push({ layout: state.layout, potted: state.potted });
+      const balls = sug.sim.final.map((b) => ({ id: b.id, pos: { x: b.pos.x, y: b.pos.y } })).sort((a, b) => a.id - b.id);
+      const sunk = sug.sim.pocketed.filter((p) => p.id !== 0 && !state.potted.some((q) => q.id === p.id));
+      changed({ mode: state.layout.mode, balls }, state.cloth, [...state.potted, ...sunk]);
+    },
+    undo() {
+      const prev = history.pop();
+      if (prev) changed(prev.layout, state.cloth, prev.potted);
+    },
     receive(r, layout) {
       if (encodeLayout(layout) !== encodeLayout(state.layout) || timer !== null) return;
       state = { ...state, advice: r, selected: 0, computing: false };

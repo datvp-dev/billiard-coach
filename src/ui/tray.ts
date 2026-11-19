@@ -95,7 +95,12 @@ export function createTray(root: HTMLElement, store: Store): { update(s: AppStat
   return {
     update(s) {
       if (s.layout.mode !== mode) build(s.layout.mode);
-      for (const { id, b } of buttons) b.setAttribute('aria-pressed', String(s.layout.balls.some((x) => x.id === id)));
+      for (const { id, b } of buttons) {
+        const potted = s.potted.some((x) => x.id === id);
+        b.setAttribute('aria-pressed', String(s.layout.balls.some((x) => x.id === id)));
+        b.classList.toggle('potted', potted);
+        b.setAttribute('aria-label', (id === 0 ? 'Bi cái' : `Bi ${id}`) + (potted ? ', đã vào lỗ' : ''));
+      }
     },
   };
 }

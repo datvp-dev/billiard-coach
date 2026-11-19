@@ -13,10 +13,10 @@ export function cardTitle(s: Suggestion, portrait: boolean): string {
   return `Bi ${s.targetId} vào ${s.pocket ? pocketName(s.pocket, portrait) : 'lỗ'}`;
 }
 
-export function statusMessage(a: AdviceResult | null, computing: boolean): string | null {
+export function statusMessage(a: AdviceResult | null, computing: boolean, pottedCount = 0): string | null {
   if (computing || !a) return 'Đang tính…';
   if (a.status === 'no-cue') return 'Đặt bi cái lên bàn để nhận gợi ý.';
-  if (a.status === 'no-target') return 'Đặt ít nhất một bi số lên bàn.';
+  if (a.status === 'no-target') return pottedCount > 0 ? 'Đã ăn hết bi. Bấm "Chọn lại" để thử cách đánh khác.' : 'Đặt ít nhất một bi số lên bàn.';
   if (a.suggestions.length === 0) return 'Không tìm được cú đánh hợp lệ. Thử chỉnh lại vị trí bi.';
   return null;
 }
@@ -51,7 +51,7 @@ function h<K extends keyof HTMLElementTagNameMap>(tag: K, cls = '', text = ''): 
   return e;
 }
 
-function buildCard(s: Suggestion, index: number, portrait: boolean, onSelect: (i: number) => void, onReplay: () => void): HTMLElement {
+function buildCard(s: Suggestion, index: number, portrait: boolean, onSelect: (i: number) => void, onReplay: () => void, onPlay: (i: number) => void): HTMLElement {
   const card = h('div', 'card');
   card.setAttribute('role', 'button');
   card.tabIndex = 0;
@@ -93,41 +93,68 @@ function buildCard(s: Suggestion, index: number, portrait: boolean, onSelect: (i
     onSelect(index);
     onReplay();
   });
-  card.append(replay);
+  const play = h('button', 'play', 'Đánh');
+  play.type = 'button';
+  play.setAttribute('aria-label', 'Đánh cú này và xem gợi ý cho bi tiếp theo');
+  play.addEventListener('click', (e) => {
+    e.stopPropagation();
+    onPlay(index);
+  });
+  card.append(replay, play);
   return card;
 }
 
 const NOTE = 'Đường bi là ước lượng. Nỉ và băng mỗi bàn một khác.';
 
-/** Renders the suggestion cards. Rebuilds only when the advice itself changes, so scrolling is kept. */
-export function createCards(root: HTMLElement, onSelect: (i: number) => void, onReplay: () => void): { update(s: AppState, portrait: boolean): void } {
+/**
+ * Renders the run bar (undo + note) and the suggestion cards.
+ * The cards are rebuilt only when the advice itself changes, so scrolling is kept.
+ */
+export function createCards(
+  root: HTMLElement,
+  on: { select(i: number): void; replay(): void; play(i: number): void; undo(): void },
+): { update(s: AppState, portrait: boolean): void } {
+  const bar = h('div', 'runbar');
+  const undo = h('button', 'undo', '← Chọn lại');
+  undo.type = 'button';
+  undo.setAttribute('aria-label', 'Quay lại cú trước để chọn cách đánh khác');
+  undo.addEventListener('click', () => on.undo());
+  const note = h('p', 'note', NOTE);
+  bar.append(undo, note);
+  const body = h('div', 'cards-body');
+  root.replaceChildren(bar, body);
+
   let shown: AdviceResult | null | undefined;
   let shownPortrait = false;
   let shownComputing = false;
+  let shownPotted = -1;
   let cards: HTMLElement[] = [];
 
   return {
     update(s, portrait) {
-      if (s.advice !== shown || portrait !== shownPortrait || s.computing !== shownComputing) {
+      undo.hidden = s.steps === 0;
+      note.textContent = s.steps === 0 ? NOTE : `Đã đánh ${s.steps} cú. ${NOTE}`;
+      if (s.advice !== shown || portrait !== shownPortrait || s.computing !== shownComputing || s.potted.length !== shownPotted) {
         shown = s.advice;
         shownPortrait = portrait;
         shownComputing = s.computing;
-        root.replaceChildren();
+        shownPotted = s.potted.length;
+        body.replaceChildren();
         cards = [];
-        const msg = statusMessage(s.advice, s.computing);
-        if (msg !== null) root.append(h('div', 'status', msg));
+        const msg = statusMessage(s.advice, s.computing, s.potted.length);
+        if (msg !== null) body.append(h('div', 'status', msg));
         else if (s.advice && s.advice.status === 'ok') {
           const strip = h('div', 'cards');
-          cards = s.advice.suggestions.map((sg, i) => buildCard(sg, i, portrait, onSelect, onReplay));
+          cards = s.advice.suggestions.map((sg, i) => buildCard(sg, i, portrait, on.select, on.replay, on.play));
           strip.append(...cards);
-          root.append(strip, h('p', 'note', NOTE));
+          body.append(strip);
         }
       }
       cards.forEach((c, i) => {
-        const on = i === s.selected;
-        if (c.getAttribute('aria-pressed') !== String(on)) {
-          c.setAttribute('aria-pressed', String(on));
-          if (on) c.scrollIntoView?.({ block: 'nearest', inline: 'center', behavior: 'smooth' });
+        const active = i === s.selected;
+        if (c.getAttribute('aria-pressed') !== String(active)) {
+          c.setAttribute('aria-pressed', String(active));
+          if (active) c.scrollIntoView?.({ block: 'nearest', inline: 'center', behavior: 'smooth' });
         }
       });
     },

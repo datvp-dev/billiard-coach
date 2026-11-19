@@ -80,7 +80,7 @@ function stopReplay() {
   }
 }
 
-function startReplay() {
+function startReplay(then?: () => void) {
   stopReplay();
   const s = store.get();
   if (!s.advice || s.advice.status !== 'ok') return;
@@ -95,15 +95,30 @@ function startReplay() {
     ui.replay = sampleAt(sug.sim, start, t);
     redraw();
     if (t < duration + (HOLD_MS / 1000) * rate) replayFrame = requestAnimationFrame(frame);
-    else stopReplay();
+    else {
+      stopReplay();
+      then?.();
+    }
   };
   replayFrame = requestAnimationFrame(frame);
 }
 
-const cards = createCards(cardsWrap, (i) => {
-  stopReplay();
-  store.select(i);
-}, startReplay);
+const cards = createCards(cardsWrap, {
+  select(i) {
+    stopReplay();
+    store.select(i);
+  },
+  replay: () => startReplay(),
+  // Show the shot, then leave the balls where it put them and advise on the next ball.
+  play(i) {
+    store.select(i);
+    startReplay(() => store.applySuggestion(i));
+  },
+  undo() {
+    stopReplay();
+    store.undo();
+  },
+});
 
 new ResizeObserver(() => {
   resize();
