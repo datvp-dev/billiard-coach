@@ -93,6 +93,7 @@ function potCandidates(layout: Layout, targetId: number, tips: TipName[], cloth:
     let score = d.potProb * (SCORE.wPot + SCORE.wPos * d.posQuality);
     if (d.tipName === 'center') score += SCORE.bonusCenter;
     if (d.powerLevel === 2 || d.powerLevel === 3) score += SCORE.bonusMidPower;
+    if (d.powerLevel === 4) score -= SCORE.penHighPower;
     if (d.powerLevel === 5) score -= SCORE.penMaxPower;
     if (d.tipName === 'left' || d.tipName === 'right') score -= SCORE.penSide;
     if (d.sim.cueTouched.length > 1) score -= SCORE.penExtraContact;
@@ -109,6 +110,7 @@ function pickDistinct(cands: Draft[], max: number): Draft[] {
   const chosen: Draft[] = [];
   for (const c of cands) {
     if (chosen.length >= max) break;
+    if (chosen.length > 0 && c.score < chosen[0].score - SCORE.maxScoreGap) break;
     const clash = chosen.some((o) => o.pocket === c.pocket && dist(o.stopZone[0], c.stopZone[0]) < SCORE.diversityDist);
     if (!clash) chosen.push(c);
   }

@@ -61,9 +61,12 @@ export const SCORE = {
   bonusCenter: 0.03,
   bonusMidPower: 0.02,
   penSide: 0.08,
+  penHighPower: 0.02,
   penMaxPower: 0.05,
   penExtraContact: 0.05,
   penNearRail: 0.03,
   scratchPerturbFactor: 0.5,
   diversityDist: 0.25,
+  /** Alternatives scoring this far below the best pot are not worth showing. */
+  maxScoreGap: 0.15,
 };
