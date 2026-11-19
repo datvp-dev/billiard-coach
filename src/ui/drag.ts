@@ -11,8 +11,16 @@ export function releaseRemovesBall(p: Vec2, tray: { top: number; bottom: number;
   return p.x >= tray.left && p.x <= tray.right && p.y >= tray.top + TRAY_INSET_PX && p.y <= tray.bottom;
 }
 
+/** Cue direction for a finger at `p` (table metres); null when the finger is on the cue ball itself. */
+export function aimAngle(cue: Vec2, p: Vec2): number | null {
+  const dx = p.x - cue.x;
+  const dy = p.y - cue.y;
+  return Math.hypot(dx, dy) < 2 * TABLE.R ? null : Math.atan2(dy, dx);
+}
+
 /**
- * Drag balls with a finger or mouse. Releasing a ball over the tray takes it off the table.
+ * While the hand-set shot is open, a touch anywhere on the table points the cue there.
+ * Otherwise: drag balls with a finger or mouse. Releasing a ball over the tray takes it off the table.
  * `onInteract` fires when a drag starts (used to stop a running replay).
  */
 export function attachDrag(
@@ -26,6 +34,12 @@ export function attachDrag(
 ): void {
   let grabOffset: Vec2 = { x: 0, y: 0 };
   let pointerId: number | null = null;
+  let aiming = false;
+  const aimAt = (p: Vec2) => {
+    const cue = store.get().layout.balls.find((b) => b.id === 0);
+    const a = cue ? aimAngle(cue.pos, getTransform().toTable(p)) : null;
+    if (a !== null) store.setCustom({ aim: a });
+  };
 
   const local = (e: PointerEvent): Vec2 => {
     const r = canvas.getBoundingClientRect();
@@ -36,6 +50,15 @@ export function attachDrag(
     if (pointerId !== null) return;
     const t = getTransform();
     const p = local(e);
+    if (store.get().custom) {
+      e.preventDefault();
+      onInteract();
+      pointerId = e.pointerId;
+      aiming = true;
+      canvas.setPointerCapture(e.pointerId);
+      aimAt(p);
+      return;
+    }
     const reach = Math.max(TABLE.R * t.scale * 1.3, MIN_GRAB_PX);
     let best: { id: number; d: number; s: Vec2 } | null = null;
     for (const b of store.get().layout.balls) {
@@ -56,6 +79,11 @@ export function attachDrag(
   });
 
   canvas.addEventListener('pointermove', (e) => {
+    if (e.pointerId === pointerId && aiming) {
+      e.preventDefault();
+      aimAt(local(e));
+      return;
+    }
     if (e.pointerId !== pointerId || !ui.drag) return;
     e.preventDefault();
     const p = local(e);
@@ -66,6 +94,12 @@ export function attachDrag(
   });
 
   const end = (e: PointerEvent, cancelled: boolean) => {
+    if (e.pointerId === pointerId && aiming) {
+      aiming = false;
+      pointerId = null;
+      if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
+      return;
+    }
     if (e.pointerId !== pointerId || !ui.drag) return;
     const id = ui.drag.id;
     pointerId = null;

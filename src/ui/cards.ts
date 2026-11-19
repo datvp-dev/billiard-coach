@@ -29,6 +29,9 @@ export function powerText(level: number, cloth: ClothSpeed): string {
   return `Lực ${powerLabel(level)} · lăn ≈${n} bàn`;
 }
 
+/** How far one tap on the arrows turns the cue. */
+const AIM_STEP_DEG = 0.25;
+
 /** Share of the pad's width taken by the ball radius. */
 const PAD_BALL = 0.46;
 
@@ -124,7 +127,7 @@ function buildCard(s: Suggestion, index: number, portrait: boolean, cloth: Cloth
 
 const NOTE = 'Đường bi là ước lượng. Nỉ và băng mỗi bàn một khác.';
 
-type EditorHandlers = { custom(patch: { tip?: Tip; power?: number }): void; closeCustom(): void; playCustom(): void; replay(): void };
+type EditorHandlers = { custom(patch: { tip?: Tip; power?: number; aim?: number | null }): void; closeCustom(): void; playCustom(): void; replay(): void };
 
 /** Cue ball to tap for the tip position, a power slider, and what the simulation says about that shot. */
 function buildEditor(on: EditorHandlers): { root: HTMLElement; update(s: AppState): void } {
@@ -177,6 +180,22 @@ function buildEditor(on: EditorHandlers): { root: HTMLElement; update(s: AppStat
   slider.addEventListener('input', () => on.custom({ power: Number(slider.value) }));
   const powerOut = h('span');
   row.append(slider, powerOut);
+  // Cue direction: drag on the table for the rough line, the arrows for a quarter of a degree.
+  const aimRow = h('div', 'custom-aim');
+  let current: AppState['custom'] = null;
+  const turn = (deg: number) => {
+    if (current) on.custom({ aim: current.sug.shot.dir + (deg * Math.PI) / 180 });
+  };
+  const aimBtn = (text: string, label: string, fn: () => void) => {
+    const b = h('button', '', text);
+    b.type = 'button';
+    b.setAttribute('aria-label', label);
+    b.addEventListener('click', fn);
+    return b;
+  };
+  const aimOut = h('span');
+  const aimAuto = aimBtn('Tự ngắm', 'Để hệ thống ngắm lại', () => on.custom({ aim: null }));
+  aimRow.append(aimBtn('↺', 'Xoay cơ ngược chiều kim đồng hồ 0,25 độ', () => turn(AIM_STEP_DEG)), aimBtn('↻', 'Xoay cơ theo chiều kim đồng hồ 0,25 độ', () => turn(-AIM_STEP_DEG)), aimOut, aimAuto);
   const result = h('p', 'custom-text');
   const actions = h('div', 'custom-actions');
   const btn = (cls: string, text: string, label: string, fn: () => void) => {
@@ -190,14 +209,17 @@ function buildEditor(on: EditorHandlers): { root: HTMLElement; update(s: AppStat
   btn('primary', 'Đánh', 'Đánh cú này và xem gợi ý cho bi tiếp theo', () => on.playCustom());
   btn('ghost', 'Giữa bi', 'Đưa điểm chạm về giữa bi', () => on.custom({ tip: { side: 0, vert: 0 } }));
   btn('ghost', 'Đóng', 'Quay lại các gợi ý', () => on.closeCustom());
-  main.append(row, result, actions);
+  main.append(row, aimRow, result, actions);
   root.append(pad, main);
 
   return {
     root,
     update(s) {
       const c = s.custom;
+      current = c;
       if (!c) return;
+      aimOut.textContent = c.aim === null ? 'Xoay cơ: kéo trên bàn' : 'Cơ tự xoay';
+      aimAuto.hidden = c.aim === null;
       dot.setAttribute('cx', String(50 + c.tip.side * ballR));
       dot.setAttribute('cy', String(50 - c.tip.vert * ballR));
       pad.setAttribute('aria-label', `Điểm chạm bi cái: ${describeTip(c.tip)}. Chạm để chọn.`);
@@ -246,7 +268,7 @@ export function createCards(
     update(s, portrait) {
       undo.hidden = s.steps === 0;
       // While the hand-set shot is open the bar names the shot being adjusted.
-      note.textContent = s.custom ? `Tự chỉnh: ${cardTitle(s.custom.base, portrait)}` : s.steps === 0 ? NOTE : `Đã đánh ${s.steps} cú.`;
+      note.textContent = s.custom ? (s.custom.aim === null ? `Tự chỉnh: ${cardTitle(s.custom.base, portrait)}` : `Tự chỉnh: bi ${s.custom.base.targetId}, tự xoay cơ`) : s.steps === 0 ? NOTE : `Đã đánh ${s.steps} cú.`;
       note.classList.toggle('strong', !!s.custom);
       tune.hidden = !!s.custom || s.computing || !activeSuggestion(s);
       body.hidden = !!s.custom;

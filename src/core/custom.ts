@@ -19,17 +19,19 @@ export function clampTip(tip: Tip): Tip {
 
 /**
  * The player's own tip position and power on the line of an existing suggestion.
- * A pot is re-aimed for the new spin and speed; a safety or kick keeps its line.
+ * With `aim` null the shot is aimed for them: a pot is re-aimed for the new spin and speed,
+ * a safety or kick keeps its line. With `aim` set, the cue points exactly that way.
  * Nothing is filtered out: a miss or a foul is simulated and described as such.
  */
-export function customShot(layout: Layout, base: Suggestion, tipWanted: Tip, power: number, cloth: ClothSpeed): Suggestion {
+export function customShot(layout: Layout, base: Suggestion, tipWanted: Tip, power: number, cloth: ClothSpeed, aim: number | null = null): Suggestion {
   const tip = clampTip(tipWanted);
   const speed = speedForPower(power);
   const cue = layout.balls.find((b) => b.id === 0)!.pos;
   const obj = layout.balls.find((b) => b.id === base.targetId)!.pos;
 
   let dir: number;
-  if (base.kind === 'pot' && base.pocket) {
+  if (aim !== null) dir = aim;
+  else if (base.kind === 'pot' && base.pocket) {
     const solved = solveAim(layout, base.targetId, base.pocket, speed, tip, cloth);
     dir = solved ?? angleOf(sub(ghostBall(obj, base.pocket), cue)) - PHYS.squirtPerSide * tip.side;
   } else {
@@ -40,32 +42,36 @@ export function customShot(layout: Layout, base: Suggestion, tipWanted: Tip, pow
   const sim = simulate(layout.balls, shot, { cloth });
   const end = (s: typeof sim): Vec2 | null => s.final.find((b) => b.id === 0)?.pos ?? null;
 
-  const potted = base.kind === 'pot' && !sim.cueScratched && sim.pocketed.some((p) => p.id === base.targetId && p.pocket === base.pocket);
+  // A hand-aimed shot may send the ball to any pocket; an automatic one is judged on its own pocket.
+  const fell = sim.pocketed.find((p) => p.id === base.targetId && (aim !== null || p.pocket === base.pocket));
+  const kind = aim !== null ? 'pot' : base.kind;
+  const pocket = aim !== null ? fell?.pocket : base.pocket;
+  const potted = kind === 'pot' && !sim.cueScratched && sim.firstContact === base.targetId && !!fell && !!pocket;
   const nextId = nextBallId(layout, base.targetId);
   const stopZone: Vec2[] = [end(sim) ?? cue];
-  let posQuality = base.kind === 'pot' ? 0 : base.posQuality;
+  let posQuality = kind === 'pot' ? 0 : base.posQuality;
   if (potted) {
-    let q = nextId === null ? 1 : leaveQuality(sim, layout.mode, base.targetId, base.pocket!);
+    let q = nextId === null ? 1 : leaveQuality(sim, layout.mode, base.targetId, pocket!);
     for (const f of [0.9, 1.1]) {
       const alt = simulate(layout.balls, { ...shot, speed: speed * f }, { cloth });
       const p = end(alt);
       if (p) stopZone.push(p);
-      q += nextId === null ? (alt.cueScratched ? 0 : 1) : leaveQuality(alt, layout.mode, base.targetId, base.pocket!);
+      q += nextId === null ? (alt.cueScratched ? 0 : 1) : leaveQuality(alt, layout.mode, base.targetId, pocket!);
     }
     posQuality = q / 3;
   }
   const hit = sim.events.find((e) => e.type === 'ball');
   const draft: Omit<Suggestion, 'text'> = {
-    kind: base.kind,
+    kind,
     targetId: base.targetId,
-    pocket: base.pocket,
+    pocket,
     shot,
     tipName: 'custom',
     powerLevel: power,
-    potProb: potted ? potProbability(cue, obj, base.pocket!) : 0,
+    potProb: potted ? potProbability(cue, obj, pocket!) : 0,
     posQuality,
     score: 0,
-    ghost: base.kind === 'pot' ? (hit ? hit.pos : ghostBall(obj, base.pocket!)) : base.ghost,
+    ghost: kind === 'pot' ? (hit ? hit.pos : pocket ? ghostBall(obj, pocket) : null) : base.ghost,
     sim,
     stopZone,
   };

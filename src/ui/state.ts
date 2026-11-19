@@ -17,7 +17,7 @@ export type AppState = {
   /** How many played shots can be undone. */
   steps: number;
   /** The player's own tip position and power, tried on the line of the selected suggestion. */
-  custom: { base: Suggestion; tip: Tip; power: number; sug: Suggestion } | null;
+  custom: { base: Suggestion; tip: Tip; power: number; /** Cue direction set by hand, or null to aim automatically. */ aim: number | null; sug: Suggestion } | null;
 };
 
 /** The shot drawn on the table: the hand-set one while it is open, otherwise the selected suggestion. */
@@ -43,7 +43,7 @@ export type Store = {
   undo(): void;
   /** Start a hand-set shot from the selected suggestion's tip and power. */
   openCustom(): void;
-  setCustom(patch: { tip?: Tip; power?: number }): void;
+  setCustom(patch: { tip?: Tip; power?: number; aim?: number | null }): void;
   closeCustom(): void;
   /** Play the hand-set shot, fouls and misses included. */
   applyCustom(): void;
@@ -136,10 +136,10 @@ export function createStore(
     const sunk = sug.sim.pocketed.filter((p) => p.id !== 0 && !state.potted.some((q) => q.id === p.id));
     changed({ mode: state.layout.mode, balls }, state.cloth, [...state.potted, ...sunk]);
   };
-  const setCustomShot = (base: Suggestion, tipWanted: Tip, powerWanted: number) => {
+  const setCustomShot = (base: Suggestion, tipWanted: Tip, powerWanted: number, aim: number | null) => {
     const tip = clampTip(tipWanted);
     const power = Math.max(1, Math.min(POWER_SPEEDS.length, powerWanted));
-    state = { ...state, custom: { base, tip, power, sug: customShot(state.layout, base, tip, power, state.cloth) } };
+    state = { ...state, custom: { base, tip, power, aim, sug: customShot(state.layout, base, tip, power, state.cloth, aim) } };
     emit();
   };
 
@@ -187,11 +187,11 @@ export function createStore(
     },
     openCustom() {
       const base = activeSuggestion({ ...state, custom: null });
-      if (base) setCustomShot(base, base.shot.tip, base.powerLevel);
+      if (base) setCustomShot(base, base.shot.tip, base.powerLevel, null);
     },
     setCustom(patch) {
       const c = state.custom;
-      if (c) setCustomShot(c.base, patch.tip ?? c.tip, patch.power ?? c.power);
+      if (c) setCustomShot(c.base, patch.tip ?? c.tip, patch.power ?? c.power, patch.aim === undefined ? c.aim : patch.aim);
     },
     closeCustom() {
       if (!state.custom) return;

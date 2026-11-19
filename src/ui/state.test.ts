@@ -276,3 +276,17 @@ test('playing the hand-set shot leaves the balls where its simulation put them a
   store.undo();
   expect(store.get().layout).toBe(before);
 });
+
+test('the cue direction can be set by hand and handed back to the automatic aim', () => {
+  const { store } = playable();
+  store.openCustom();
+  const auto = store.get().custom!.sug.shot.dir;
+  expect(store.get().custom!.aim).toBeNull();
+  store.setCustom({ aim: auto + 0.1 });
+  expect(store.get().custom!.aim).toBe(auto + 0.1);
+  expect(store.get().custom!.sug.shot.dir).toBe(auto + 0.1);
+  store.setCustom({ power: 5 });
+  expect(store.get().custom!.aim).toBe(auto + 0.1);
+  store.setCustom({ aim: null, power: store.get().custom!.base.powerLevel });
+  expect(store.get().custom!.sug.shot.dir).toBeCloseTo(auto, 9);
+});

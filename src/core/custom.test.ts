@@ -66,3 +66,30 @@ test('tip positions are described as a share of the maximum offset', () => {
   expect(describeTip({ side: -0.2, vert: 0.3 })).toBe('cao 60%, trái 40%');
   expect(describeTip({ side: 0.25, vert: -0.5 })).toBe('thấp 100%, phải 50%');
 });
+
+// --- the player's own cue direction ---
+test('with a hand-set direction the cue points exactly where the player put it', () => {
+  const b = base();
+  const c = customShot(LAYOUT, b, { side: 0.3, vert: 0 }, 4, 'medium', b.shot.dir + 0.2);
+  expect(c.shot.dir).toBe(b.shot.dir + 0.2);
+});
+test('aiming a few degrees off the pot misses and says so', () => {
+  const b = base();
+  const c = customShot(LAYOUT, b, b.shot.tip, b.powerLevel, 'medium', b.shot.dir - (1.2 * Math.PI) / 180);
+  expect(c.sim.firstContact).toBe(1);
+  expect(c.sim.pocketed.some((p) => p.id === 1)).toBe(false);
+  expect(c.potProb).toBe(0);
+  expect(c.text).toContain('Bi 1 không vào lỗ');
+});
+test('aiming along the suggested line still pots the ball', () => {
+  const b = base();
+  const c = customShot(LAYOUT, b, b.shot.tip, b.powerLevel, 'medium', b.shot.dir);
+  expect(c.sim.pocketed).toContainEqual({ id: 1, pocket: b.pocket });
+  expect(c.pocket).toBe(b.pocket);
+  expect(c.potProb).toBeGreaterThan(0);
+});
+test('aiming away from every ball is a foul', () => {
+  const b = base();
+  const c = customShot(LAYOUT, b, { side: 0, vert: 0 }, 3, 'medium', Math.PI);
+  expect(c.text).toContain('phạm lỗi');
+});

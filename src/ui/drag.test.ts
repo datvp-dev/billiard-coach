@@ -9,3 +9,11 @@ test('a ball is removed only when released well inside the tray', () => {
   expect(releaseRemovesBall({ x: 100, y: 590 }, tray)).toBe(false);
   expect(releaseRemovesBall({ x: 400, y: 620 }, tray)).toBe(false);
 });
+
+import { aimAngle } from './drag';
+
+test('the cue direction runs from the cue ball to the finger, and a touch on the cue ball itself is ignored', () => {
+  expect(aimAngle({ x: 1, y: 0.5 }, { x: 2, y: 0.5 })).toBe(0);
+  expect(aimAngle({ x: 1, y: 0.5 }, { x: 1, y: 1 })).toBeCloseTo(Math.PI / 2, 9);
+  expect(aimAngle({ x: 1, y: 0.5 }, { x: 1.01, y: 0.5 })).toBeNull();
+});
