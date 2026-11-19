@@ -20,17 +20,20 @@ export const TABLE = {
 export const PHYS = {
   g: 9.81,
   muSlide: 0.2,
-  muSpin: 0.044,
+  /** Gives 10 rad/s^2 spin-down; measured range is 5-15 (Dr. Dave, physical properties table). */
+  muSpin: 0.012,
   muRoll: { fast: 0.008, medium: 0.01, slow: 0.013 },
   eBall: 0.95,
   /** Ball-ball friction mu = A + B * exp(-C * vRel). */
   muBallA: 9.951e-3,
   muBallB: 0.108,
   muBallC: 1.088,
-  eCushion: 0.85,
-  muCushion: 0.2,
-  /** Cushion nose height = 7R/5. */
-  cushionH: 0.04,
+  // Cushion values are tuned so the 2-to-1, Plus and Corner-5 systems and the rolling-ball
+  // rail rebound of TP B.6 come out as published (see systems.test.ts).
+  eCushion: 0.8,
+  muCushion: 0.25,
+  /** Cushion nose height: 63.5% of the ball diameter (WPA allows 62.5-64.5%). */
+  cushionH: 0.0363,
   eJaw: 0.6,
   /** Cue ball deflection in radians per unit tip.side. */
   squirtPerSide: 0.035,

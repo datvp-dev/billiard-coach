@@ -67,8 +67,6 @@ export function collideBalls(a: Body, b: Body): void {
   }
 }
 
-const SIN_T = PHYS.cushionH / R - 1;
-const COS_T = Math.sqrt(1 - SIN_T * SIN_T);
 
 /**
  * Ball-cushion collision after Han (2005). `n` is the cushion normal pointing into the table.
@@ -87,6 +85,8 @@ export function collideCushion(b: Body, n: Vec2): void {
   let wy = b.w.x * yx + b.w.y * yy;
   let wz = b.w.z;
 
+  const SIN_T = PHYS.cushionH / R - 1;
+  const COS_T = Math.sqrt(1 - SIN_T * SIN_T);
   const e = PHYS.eCushion;
   const mu = PHYS.muCushion;
   const sx = vx * SIN_T + R * wy;
