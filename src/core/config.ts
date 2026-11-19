@@ -34,13 +34,13 @@ export const PHYS = {
   eJaw: 0.6,
   /** Cue ball deflection in radians per unit tip.side. */
   squirtPerSide: 0.035,
-  dt: 0.001,
+  dt: 0.004,
   maxTime: 20,
   sampleEvery: 0.01,
 };
 
 /** m/s for power level 1..5. */
-export const POWER_SPEEDS = [0.8, 1.5, 2.5, 3.8, 5.5] as const;
+export const POWER_SPEEDS = [0.6, 1.1, 1.8, 2.9, 4.5] as const;
 
 export const TIPS: Record<TipName, Tip> = {
   center: { side: 0, vert: 0 },
