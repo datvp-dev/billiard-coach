@@ -17,13 +17,16 @@ export function clampTip(tip: Tip): Tip {
   return { side: (tip.side * MAX_TIP) / d, vert: (tip.vert * MAX_TIP) / d };
 }
 
+/** What a hand-set shot needs from the suggestion it starts from. */
+export type ShotBase = Pick<Suggestion, 'kind' | 'targetId' | 'pocket' | 'shot' | 'posQuality' | 'ghost'>;
+
 /**
  * The player's own tip position and power on the line of an existing suggestion.
  * With `aim` null the shot is aimed for them: a pot is re-aimed for the new spin and speed,
  * a safety or kick keeps its line. With `aim` set, the cue points exactly that way.
  * Nothing is filtered out: a miss or a foul is simulated and described as such.
  */
-export function customShot(layout: Layout, base: Suggestion, tipWanted: Tip, power: number, cloth: ClothSpeed, aim: number | null = null): Suggestion {
+export function customShot(layout: Layout, base: ShotBase, tipWanted: Tip, power: number, cloth: ClothSpeed, aim: number | null = null): Suggestion {
   const tip = clampTip(tipWanted);
   const speed = speedForPower(power);
   const cue = layout.balls.find((b) => b.id === 0)!.pos;

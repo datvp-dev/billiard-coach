@@ -290,3 +290,32 @@ test('the cue direction can be set by hand and handed back to the automatic aim'
   store.setCustom({ aim: null, power: store.get().custom!.base.powerLevel });
   expect(store.get().custom!.sug.shot.dir).toBeCloseTo(auto, 9);
 });
+
+// --- saved hand-set shots ---
+import { restoreSaved, snapshotShot } from './saved';
+
+test('opening a saved shot puts its table back and reopens the hand-set shot as it was', () => {
+  const { store } = playable();
+  store.openCustom();
+  store.setCustom({ tip: { side: 0.2, vert: -0.3 }, power: 2.5, aim: 0.5 });
+  const shot = snapshotShot(store.get(), 1)!;
+  const dir = store.get().custom!.sug.shot.dir;
+  const other = setup('m10;0:300,300;1:600,600');
+  vi.advanceTimersByTime(200);
+  other.store.setCloth('slow');
+  other.store.openSaved(restoreSaved({ ...shot, cloth: 'fast' })!);
+  const s = other.store.get();
+  expect(encodeLayout(s.layout)).toBe(shot.layout);
+  expect(s.cloth).toBe('fast');
+  expect(s.steps).toBe(0);
+  expect(s.potted).toEqual([]);
+  expect(s.custom!.tip).toEqual({ side: 0.2, vert: -0.3 });
+  expect(s.custom!.power).toBe(2.5);
+  expect(s.custom!.sug.shot.dir).toBe(dir);
+  // the shot stays open when the advice for the restored table arrives
+  vi.advanceTimersByTime(200);
+  const last = other.requests[other.requests.length - 1];
+  other.store.receive(advise(last, { cloth: 'fast' }), last);
+  expect(other.store.get().custom!.power).toBe(2.5);
+  expect(JSON.parse(other.storage.getItem(STORAGE_KEY)!)).toEqual({ layout: shot.layout, cloth: 'fast' });
+});

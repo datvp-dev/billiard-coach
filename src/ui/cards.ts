@@ -127,7 +127,7 @@ function buildCard(s: Suggestion, index: number, portrait: boolean, cloth: Cloth
 
 const NOTE = 'Đường bi là ước lượng. Nỉ và băng mỗi bàn một khác.';
 
-type EditorHandlers = { custom(patch: { tip?: Tip; power?: number; aim?: number | null }): void; closeCustom(): void; playCustom(): void; replay(): void };
+type EditorHandlers = { custom(patch: { tip?: Tip; power?: number; aim?: number | null }): void; closeCustom(): void; playCustom(): void; replay(): void; /** Keep the open shot; false when the device would not store it. */ saveCustom(): boolean };
 
 /** Cue ball to tap for the tip position, a power slider, and what the simulation says about that shot. */
 function buildEditor(on: EditorHandlers): { root: HTMLElement; update(s: AppState): void } {
@@ -204,10 +204,15 @@ function buildEditor(on: EditorHandlers): { root: HTMLElement; update(s: AppStat
     b.setAttribute('aria-label', label);
     b.addEventListener('click', fn);
     actions.append(b);
+    return b;
   };
-  btn('ghost', '▶ Xem', 'Xem cú đánh này', () => on.replay());
+  btn('ghost narrow', '▶', 'Xem cú đánh này', () => on.replay());
   btn('primary', 'Đánh', 'Đánh cú này và xem gợi ý cho bi tiếp theo', () => on.playCustom());
-  btn('ghost', 'Giữa bi', 'Đưa điểm chạm về giữa bi', () => on.custom({ tip: { side: 0, vert: 0 } }));
+  const save = btn('ghost', 'Lưu', 'Lưu cú tự chỉnh này cùng thế bi', () => {
+    save.textContent = on.saveCustom() ? 'Đã lưu' : 'Lỗi lưu';
+    setTimeout(() => (save.textContent = 'Lưu'), 1400);
+  });
+  btn('ghost wide', 'Giữa bi', 'Đưa điểm chạm về giữa bi', () => on.custom({ tip: { side: 0, vert: 0 } }));
   btn('ghost', 'Đóng', 'Quay lại các gợi ý', () => on.closeCustom());
   main.append(row, aimRow, result, actions);
   root.append(pad, main);

@@ -47,6 +47,8 @@ export type Store = {
   closeCustom(): void;
   /** Play the hand-set shot, fouls and misses included. */
   applyCustom(): void;
+  /** Put back a saved table and reopen its hand-set shot. */
+  openSaved(r: { layout: Layout; cloth: ClothSpeed; base: Suggestion; tip: Tip; power: number; aim: number | null }): void;
   clear(): void;
   randomize(): void;
   /** Result from the advisor; ignored unless it was computed for the current layout. */
@@ -200,6 +202,11 @@ export function createStore(
     },
     applyCustom() {
       if (state.custom) play(state.custom.sug);
+    },
+    openSaved(r) {
+      history = [];
+      changed(r.layout, r.cloth, []);
+      setCustomShot(r.base, r.tip, r.power, r.aim);
     },
     undo() {
       const prev = history.pop();

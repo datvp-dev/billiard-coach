@@ -3,6 +3,9 @@ import { createCards } from './ui/cards';
 import { attachDrag } from './ui/drag';
 import { createPhotoImport } from './ui/photo';
 import { sampleAt, simDuration } from './ui/replay';
+import { addSaved, loadSaved, removeSaved, restoreSaved, snapshotShot, storeSaved } from './ui/saved';
+import { createSavedSheet } from './ui/savedSheet';
+import { renderSnapshot, saveSnapshot, snapshotFileName } from './ui/snapshot';
 import { activeSuggestion, createStore, loadInitial, type StorageLike } from './ui/state';
 import { computeTransform, drawTable, type TableUi, type ViewTransform } from './ui/tableView';
 import { createToolbar, createTray } from './ui/tray';
@@ -25,7 +28,32 @@ const stage = document.createElement('main');
 stage.className = 'stage';
 const canvas = document.createElement('canvas');
 canvas.setAttribute('aria-label', 'Bàn bi-a. Kéo bi để đặt vị trí.');
-stage.append(canvas);
+const stageTools = document.createElement('div');
+stageTools.className = 'stage-tools';
+const ICONS = {
+  saved: 'M6 3h12a1 1 0 0 1 1 1v17l-7-4.5L5 21V4a1 1 0 0 1 1-1z',
+  picture: 'M12 3v10m0 0l-4-4m4 4l4-4M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4',
+};
+/** Small icon-over-label button that fits in the strip beside an upright table. */
+function toolButton(icon: string): { button: HTMLButtonElement; label: HTMLSpanElement } {
+  const button = document.createElement('button');
+  button.type = 'button';
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('aria-hidden', 'true');
+  const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  path.setAttribute('d', icon);
+  svg.append(path);
+  const label = document.createElement('span');
+  button.append(svg, label);
+  return { button, label };
+}
+const { button: savedBtn, label: savedLabel } = toolButton(ICONS.saved);
+const { button: shotBtn, label: shotLabel } = toolButton(ICONS.picture);
+shotLabel.textContent = 'Lưu ảnh';
+shotBtn.setAttribute('aria-label', 'Lưu ảnh bàn hiện tại');
+stageTools.append(savedBtn, shotBtn);
+stage.append(canvas, stageTools);
 const trayEl = document.createElement('div');
 trayEl.className = 'tray';
 const cardsWrap = document.createElement('section');
@@ -132,6 +160,56 @@ const cards = createCards(cardsWrap, {
     store.closeCustom();
   },
   playCustom: () => startReplay(() => store.applyCustom()),
+  saveCustom() {
+    const shot = snapshotShot(store.get(), Date.now());
+    if (!shot) return false;
+    const next = addSaved(saved, shot);
+    if (!storeSaved(storage, next)) return false;
+    saved = next;
+    showSavedCount();
+    return true;
+  },
+});
+
+// --- Saved hand-set shots ---
+let saved = loadSaved(storage);
+function showSavedCount() {
+  savedBtn.hidden = saved.length === 0;
+  savedLabel.textContent = `Đã lưu ${saved.length}`;
+  savedBtn.setAttribute('aria-label', `Xem ${saved.length} cú đánh đã lưu`);
+}
+const savedSheet = createSavedSheet({
+  host: document.body,
+  list: () => saved,
+  open(shot) {
+    const r = restoreSaved(shot);
+    if (!r) return;
+    stopReplay();
+    store.openSaved(r);
+  },
+  remove(id) {
+    const next = removeSaved(saved, id);
+    if (storeSaved(storage, next)) saved = next;
+    showSavedCount();
+  },
+});
+savedBtn.addEventListener('click', () => savedSheet.show());
+showSavedCount();
+
+// --- Picture of the table as it is shown now ---
+shotBtn.addEventListener('click', async () => {
+  stopReplay();
+  shotBtn.disabled = true;
+  let how: Awaited<ReturnType<typeof saveSnapshot>> = 'failed';
+  try {
+    how = await saveSnapshot(renderSnapshot(store.get(), transform.portrait), snapshotFileName(new Date()));
+  } catch {
+    // canvas export refused
+  }
+  shotBtn.disabled = false;
+  if (how === 'cancelled' || how === 'shared') return;
+  shotLabel.textContent = how === 'downloaded' ? 'Đã tải' : 'Lỗi';
+  setTimeout(() => (shotLabel.textContent = 'Lưu ảnh'), 1600);
 });
 
 new ResizeObserver(() => {
