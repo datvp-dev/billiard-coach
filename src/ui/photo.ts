@@ -54,7 +54,11 @@ async function decode(file: Blob): Promise<HTMLCanvasElement> {
  * Photo -> layout, entirely on the device. Two steps in a full-screen sheet: line the four
  * corner pockets up, then check the balls that were found and fix their numbers.
  */
-export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; place(layout: Layout): void }): { pick(): void } {
+export type FrameChoice = { corners: Vec2[]; horizontal: boolean; markers: Marker[] };
+/** A still frame of a video to mark the table on; `start` reuses an earlier choice. */
+export type FrameRequest = { start?: { corners: Vec2[]; horizontal: boolean }; doneLabel: string; done(choice: FrameChoice): void };
+
+export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; place(layout: Layout): void }): { pick(): void; openFrame(frame: HTMLCanvasElement, req: FrameRequest): void } {
   const input = el('input');
   input.type = 'file';
   input.accept = 'image/*';
@@ -84,6 +88,7 @@ export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; p
   let markers: Marker[] = [];
   let selected = -1;
   let dragging = -1;
+  let frameReq: FrameRequest | null = null;
   let cssW = 0;
   let cssH = 0;
   let view = { scale: 1, ox: 0, oy: 0 };
@@ -104,6 +109,7 @@ export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; p
     photo = null;
     raster = null;
     markers = [];
+    frameReq = null;
   }
 
   function renderChrome() {
@@ -164,7 +170,14 @@ export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; p
         draw();
       }),
       button('Hủy', 'ghost', close),
-      button(`Đặt ${named} bi lên bàn`, 'primary', () => {
+      button(frameReq ? frameReq.doneLabel : `Đặt ${named} bi lên bàn`, 'primary', () => {
+        if (frameReq) {
+          const req = frameReq;
+          const choice: FrameChoice = { corners, horizontal, markers };
+          close();
+          req.done(choice);
+          return;
+        }
         const layout = markersToLayout(markers, deps.mode());
         close();
         deps.place(layout);
@@ -336,6 +349,7 @@ export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; p
   canvas.addEventListener('pointercancel', release);
 
   async function open(file: Blob) {
+    frameReq = null;
     sheet.hidden = false;
     step = 'corners';
     hint.textContent = 'Đang đọc ảnh…';
@@ -348,15 +362,21 @@ export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; p
       hint.textContent = 'Không đọc được ảnh này. Hãy thử ảnh khác.';
       return;
     }
-    const data = photo.getContext('2d', { willReadFrequently: true })!.getImageData(0, 0, photo.width, photo.height);
+    load(photo);
+  }
+
+  /** Start on a picture: read its pixels and make a first guess at the corners. */
+  function load(source: HTMLCanvasElement, start?: { corners: Vec2[]; horizontal: boolean }) {
+    photo = source;
+    const { width: w, height: h } = source;
+    const data = source.getContext('2d', { willReadFrequently: true })!.getImageData(0, 0, w, h);
     raster = { width: data.width, height: data.height, data: data.data };
-    const g = guessCorners(raster);
+    const g = start ?? guessCorners(raster);
     found = !!g;
     if (g) {
-      corners = g.corners.map((c) => ({ x: Math.max(0, Math.min(photo!.width, c.x)), y: Math.max(0, Math.min(photo!.height, c.y)) }));
+      corners = g.corners.map((c) => ({ x: Math.max(0, Math.min(w, c.x)), y: Math.max(0, Math.min(h, c.y)) }));
       horizontal = g.horizontal;
     } else {
-      const { width: w, height: h } = photo;
       corners = [
         { x: w * 0.15, y: h * 0.15 },
         { x: w * 0.85, y: h * 0.15 },
@@ -369,11 +389,19 @@ export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; p
     layoutCanvas();
   }
 
+  function openFrame(frame: HTMLCanvasElement, req: FrameRequest) {
+    frameReq = req;
+    sheet.hidden = false;
+    step = 'corners';
+    selected = -1;
+    load(frame, req.start);
+  }
+
   input.addEventListener('change', () => {
     const file = input.files?.[0];
     input.value = '';
     if (file) void open(file);
   });
 
-  return { pick: () => input.click() };
+  return { pick: () => input.click(), openFrame };
 }

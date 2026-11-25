@@ -1,6 +1,7 @@
 import './style.css';
 import { createCards } from './ui/cards';
 import { attachDrag } from './ui/drag';
+import { createLivePanel } from './ui/livePanel';
 import { createPhotoImport } from './ui/photo';
 import { sampleAt, simDuration } from './ui/replay';
 import { addSaved, loadSaved, removeSaved, restoreSaved, snapshotShot, storeSaved } from './ui/saved';
@@ -32,6 +33,7 @@ const stageTools = document.createElement('div');
 stageTools.className = 'stage-tools';
 const ICONS = {
   saved: 'M6 3h12a1 1 0 0 1 1 1v17l-7-4.5L5 21V4a1 1 0 0 1 1-1z',
+  live: 'M12 10a2 2 0 1 0 0 4 2 2 0 0 0 0-4zM7.8 7.8a6 6 0 0 0 0 8.4M16.2 7.8a6 6 0 0 1 0 8.4M5 5a10 10 0 0 0 0 14M19 5a10 10 0 0 1 0 14',
   picture: 'M12 3v10m0 0l-4-4m4 4l4-4M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4',
 };
 /** Small icon-over-label button that fits in the strip beside an upright table. */
@@ -52,13 +54,18 @@ const { button: savedBtn, label: savedLabel } = toolButton(ICONS.saved);
 const { button: shotBtn, label: shotLabel } = toolButton(ICONS.picture);
 shotLabel.textContent = 'Lưu ảnh';
 shotBtn.setAttribute('aria-label', 'Lưu ảnh bàn hiện tại');
-stageTools.append(savedBtn, shotBtn);
+const { button: liveBtn, label: liveLabel } = toolButton(ICONS.live);
+liveLabel.textContent = 'Live';
+liveBtn.setAttribute('aria-label', 'Theo dõi live stream');
+stageTools.append(liveBtn, savedBtn, shotBtn);
 stage.append(canvas, stageTools);
 const trayEl = document.createElement('div');
 trayEl.className = 'tray';
 const cardsWrap = document.createElement('section');
 cardsWrap.className = 'cards-wrap';
-app.replaceChildren(bar, stage, trayEl, cardsWrap);
+const livePanel = document.createElement('section');
+livePanel.className = 'live';
+app.replaceChildren(bar, livePanel, stage, trayEl, cardsWrap);
 
 const storage = safeStorage();
 const client = createAdvisorClient((r, layout) => store.receive(r, layout));
@@ -169,6 +176,26 @@ const cards = createCards(cardsWrap, {
     showSavedCount();
     return true;
   },
+});
+
+// --- Following a live stream ---
+const live = createLivePanel({
+  root: livePanel,
+  storage,
+  mode: () => store.get().layout.mode,
+  place(layout) {
+    stopReplay();
+    store.setLayout(layout);
+  },
+  openFrame: (frame, req) => photoImport.openFrame(frame, req),
+  onToggle: (open) => liveBtn.setAttribute('aria-pressed', String(open)),
+});
+liveBtn.addEventListener('click', () => live.toggle());
+let liveMode = store.get().layout.mode;
+store.subscribe((s) => {
+  if (s.layout.mode === liveMode) return;
+  liveMode = s.layout.mode;
+  live.modeChanged();
 });
 
 // --- Saved hand-set shots ---

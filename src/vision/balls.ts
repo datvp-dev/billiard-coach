@@ -13,6 +13,9 @@ const BALL_Z = R - PHYS.cushionH;
 
 /** Discs below this are shadows, logos and scuffs; real balls score well above it. */
 const MIN_SCORE = 1.05;
+/** On top of something larger than this many balls, a disc must stand out as clearly as this. */
+const LARGE = 11;
+const CLEAR_SCORE = 1.28;
 /** A full set plus six pocket mouths, which are sorted out later, and some room. */
 const MAX_SPOTS = 26;
 
@@ -44,6 +47,13 @@ export function ballView(camera: Camera) {
  * discs of a known size that differ from the cloth around them.
  */
 export function locateBalls(img: Raster, corners: Vec2[], horizontal: boolean): Spot[] {
+  return surveyBed(img, corners, horizontal).spots;
+}
+
+/** The balls, and a way to ask whether a spot on the bed shows nothing but cloth. */
+export type Survey = { spots: Spot[]; clearAt(pos: Vec2): boolean; toTable(p: Vec2): Vec2 };
+
+export function surveyBed(img: Raster, corners: Vec2[], horizontal: boolean): Survey {
   const { width: w, height: h, data } = img;
   const camera = cameraFromPlane(tableToImage(corners, horizontal), w, h);
   const view = ballView(camera);
@@ -55,7 +65,8 @@ export function locateBalls(img: Raster, corners: Vec2[], horizontal: boolean): 
   const y1 = Math.min(h, Math.ceil(Math.max(...corners.map((c) => c.y))));
   const bw = x1 - x0;
   const bh = y1 - y0;
-  if (bw < 20 || bh < 20) return [];
+  const nothing: Survey = { spots: [], clearAt: () => false, toTable: (p) => view.toTable(p.x, p.y) };
+  if (bw < 20 || bh < 20) return nothing;
   const inside = new Uint8Array(bw * bh);
   const turn = Math.sign((corners[1].x - corners[0].x) * (corners[2].y - corners[0].y) - (corners[1].y - corners[0].y) * (corners[2].x - corners[0].x)) || 1;
   for (let y = 0; y < bh; y++) {
@@ -98,7 +109,7 @@ export function locateBalls(img: Raster, corners: Vec2[], horizontal: boolean): 
     return cr.length < 30 ? null : [median(cr), median(cg), median(lum)];
   };
   const whole = sample(0, 0, bw, bh, Math.max(1, Math.floor(Math.min(bw, bh) / 90)));
-  if (!whole) return [];
+  if (!whole) return nothing;
   for (let ty = 0; ty < th; ty++) {
     for (let tx = 0; tx < tw; tx++) {
       const pad = Math.round(tile * 0.6);
@@ -197,6 +208,31 @@ export function locateBalls(img: Raster, corners: Vec2[], horizontal: boolean): 
     }
     return n < 12 ? 0 : hit / n;
   };
+  // Connected areas of things that are not cloth: an arm or a sleeve is far larger than a few balls.
+  const areaId = new Int32Array(bw * bh);
+  const areaSize: number[] = [0];
+  const stack = new Int32Array(bw * bh);
+  for (let s = 0; s < bw * bh; s++) {
+    if (areaId[s] || !inside[s] || ev[s] !== 1) continue;
+    const id = areaSize.length;
+    let n = 0;
+    let t = 0;
+    stack[t++] = s;
+    areaId[s] = id;
+    while (t > 0) {
+      const p = stack[--t];
+      n++;
+      const x = p % bw;
+      const next = (q: number) => {
+        if (!areaId[q] && inside[q] && ev[q] === 1) (areaId[q] = id), (stack[t++] = q);
+      };
+      if (x > 0) next(p - 1);
+      if (x < bw - 1) next(p + 1);
+      if (p >= bw) next(p - bw);
+      if (p < bw * (bh - 1)) next(p + bw);
+    }
+    areaSize.push(n);
+  }
   const rate = (cx: number, cy: number): { score: number; pos: Vec2; r: number; fill: number } | null => {
     const pos = view.toTable(cx + x0, cy + y0);
     if (pos.x < R * 0.55 || pos.x > L - R * 0.55 || pos.y < R * 0.55 || pos.y > W - R * 0.55) return null;
@@ -218,7 +254,9 @@ export function locateBalls(img: Raster, corners: Vec2[], horizontal: boolean): 
   for (let y = 0; y < bh; y += grid) {
     for (let x = 0; x < bw; x += grid) {
       const c = rate(x, y);
-      if (c && c.score > MIN_SCORE) cands.push({ x, y, ...c });
+      if (!c || c.score <= MIN_SCORE) continue;
+      if (areaSize[areaId[y * bw + x]] > LARGE * Math.PI * c.r * c.r && c.score < CLEAR_SCORE) continue;
+      cands.push({ x, y, ...c });
     }
   }
   cands.sort((a, b) => b.score - a.score);
@@ -271,7 +309,15 @@ export function locateBalls(img: Raster, corners: Vec2[], horizontal: boolean): 
     for (const p of mark) used[p] = 1;
     spots.push({ pos, x: mx + x0, y: my + y0, r: top.r, score: top.score });
   }
-  return spots;
+  return {
+    spots,
+    toTable: nothing.toTable,
+    clearAt(pos) {
+      const p = view.toImage(pos);
+      const [e, n] = disc(p.x - x0, p.y - y0, view.radius(pos) * 0.9);
+      return n > 0 && e / n < 0.22;
+    },
+  };
 }
 
 /** Mean colour around every pixel of a window of the picture. */
@@ -323,7 +369,12 @@ function facePixels(img: Raster, s: Spot, all: Spot[]): number[] {
 }
 
 export function findBalls(img: Raster, corners: Vec2[], horizontal: boolean, mode: GameMode): FoundBall[] {
-  let spots = locateBalls(img, corners, horizontal);
+  return nameSpots(img, corners, horizontal, mode, locateBalls(img, corners, horizontal));
+}
+
+/** Sorts out pocket mouths and gives the remaining spots their numbers. */
+export function nameSpots(img: Raster, corners: Vec2[], horizontal: boolean, mode: GameMode, all: Spot[]): FoundBall[] {
+  let spots = all;
   let faces = spots.map((s) => facePixels(img, s, spots));
   const gain = lightGain(faces.map((f) => lookOf(f))) ?? undefined;
   let looks: BallLook[] = faces.map((f) => lookOf(f, gain));
