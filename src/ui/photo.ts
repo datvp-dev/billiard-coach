@@ -1,10 +1,14 @@
 import { TABLE } from '../core/config';
 import { ballIdsForMode } from '../core/table';
 import type { GameMode, Layout, Vec2 } from '../core/types';
+import { BALL_Z } from '../vision/balls';
 import { detectBalls, guessCorners } from '../vision/detect';
-import { applyH, invertH, type Homography } from '../vision/homography';
+import { snapToSight, type FoundSights } from '../vision/findSights';
+import { frameView, type FrameView, type TableFrame } from '../vision/frame';
+import { TRUE_LENS, straightenImage } from '../vision/lens';
 import type { Raster } from '../vision/raster';
-import { tableToImage } from '../vision/table';
+import { SIGHTS } from '../vision/sights';
+import { cornersInPicture, describeFrame, newSetup, noseHandle, preview, search, type FrameSetup } from './frameSetup';
 import { assignNumber, fitImage, markersToLayout, nearestIndex, type Marker } from './photoModel';
 import { ballColor } from './tableView';
 
@@ -12,6 +16,12 @@ const { L, W, R } = TABLE;
 /** Longest side the photo is reduced to before it is analysed. */
 const MAX_SIDE = 1600;
 const GRAB_PX = 34;
+/** A sight marked by hand this far from where the others say it is, in metres, is pointed out. */
+const ASTRAY = 0.009;
+/** Room around the bed that still shows the rails, metres. */
+const RAILS = 0.17;
+/** How far outside the picture a corner may lie, as a share of its size. */
+const BEYOND = 0.35;
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls = '', text = ''): HTMLElementTagNameMap[K] {
   const e = document.createElement(tag);
@@ -50,17 +60,20 @@ async function decode(file: Blob): Promise<HTMLCanvasElement> {
   return c;
 }
 
-/**
- * Photo -> layout, entirely on the device. Two steps in a full-screen sheet: line the four
- * corner pockets up, then check the balls that were found and fix their numbers.
- */
-export type FrameChoice = { corners: Vec2[]; horizontal: boolean; markers: Marker[] };
+export type FrameChoice = { frame: TableFrame; setup: FrameSetup; markers: Marker[] };
 /**
  * A still frame of a video to mark the table on; `start` reuses an earlier choice, and `markers`
  * goes straight to checking those balls.
  */
-export type FrameRequest = { start?: { corners: Vec2[]; horizontal: boolean }; markers?: Marker[]; doneLabel: string; done(choice: FrameChoice): void; cancel?(): void };
+export type FrameRequest = { start?: { frame: TableFrame; setup: FrameSetup }; markers?: Marker[]; doneLabel: string; done(choice: FrameChoice): void; cancel?(): void };
 
+/** Something that can be dragged while the table is being lined up. */
+type Grip = { kind: 'corner' | 'sight' | 'nose'; i: number };
+
+/**
+ * Photo -> layout, entirely on the device. Two steps in a full-screen sheet: check that the table's
+ * diamonds were found and put right any that were not, then check the balls and fix their numbers.
+ */
 export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; place(layout: Layout): void }): { pick(): void; openFrame(frame: HTMLCanvasElement, req: FrameRequest): void } {
   const input = el('input');
   input.type = 'file';
@@ -85,22 +98,87 @@ export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; p
   let photo: HTMLCanvasElement | null = null;
   let raster: Raster | null = null;
   let step: 'corners' | 'review' = 'corners';
-  let corners: Vec2[] = [];
-  let horizontal = true;
-  let found = true;
+  let setup: FrameSetup = newSetup([], true);
+  let found: FoundSights | null = null;
+  let frame: TableFrame = { corners: [], horizontal: true, lens: TRUE_LENS };
+  let view: FrameView | null = null;
+  /** Lining up by the corners, as a start: the sights are not being used. */
+  let coarse = false;
+  /** Whether a first guess at the table was made, before any sights. */
+  let guessed = true;
+  let grip: Grip | null = null;
+  /** The sight or edge last touched, for the buttons and arrow keys. */
+  let picked: Grip | null = null;
+  let grab = { x: 0, y: 0 };
+  let from = { x: 0, y: 0 };
+  let moved = false;
   let markers: Marker[] = [];
   let selected = -1;
-  let dragging = -1;
   /** A ball being moved by hand: which one, where the finger started, and whether it has moved. */
   let moving: { i: number; from: Vec2; on: boolean; wasSelected: boolean } | null = null;
   let frameReq: FrameRequest | null = null;
   let cssW = 0;
   let cssH = 0;
-  let view = { scale: 1, ox: 0, oy: 0 };
+  let fit = { scale: 1, ox: 0, oy: 0 };
 
-  const toScreen = (p: Vec2): Vec2 => ({ x: view.ox + p.x * view.scale, y: view.oy + p.y * view.scale });
-  const toPhoto = (p: Vec2): Vec2 => ({ x: (p.x - view.ox) / view.scale, y: (p.y - view.oy) / view.scale });
-  const homog = (): Homography => tableToImage(corners, horizontal);
+  const toScreen = (p: Vec2): Vec2 => ({ x: fit.ox + p.x * fit.scale, y: fit.oy + p.y * fit.scale });
+  const toPhoto = (p: Vec2): Vec2 => ({ x: (p.x - fit.ox) / fit.scale, y: (p.y - fit.oy) / fit.scale });
+  /** Where a ball at this place on the table shows in the picture, and the other way. */
+  const ballAt = (p: Vec2): Vec2 => toScreen(view!.toRaw(p, BALL_Z));
+  const ballFrom = (screen: Vec2): Vec2 => view!.toTable(toPhoto(screen), BALL_Z);
+  const onBed = (t: Vec2): Vec2 => ({ x: Math.max(R, Math.min(L - R, t.x)), y: Math.max(R, Math.min(W - R, t.y)) });
+
+  function setFrame(f: TableFrame) {
+    frame = { corners: f.corners, horizontal: f.horizontal, lens: f.lens };
+    view = photo ? frameView(frame, photo.width, photo.height) : null;
+  }
+
+  /** Look for the sights again from the setup as it stands. */
+  function find() {
+    if (!raster) return;
+    found = search(raster, setup);
+    if (found.sure) {
+      coarse = false;
+      // The next search starts from here.
+      setup = { ...setup, rough: cornersInPicture(found.cal, raster.width, raster.height) };
+    }
+    setFrame(found.cal);
+  }
+
+  /** Start over from roughly where the table is now, forgetting what was set by hand. */
+  function restart(horizontal: boolean) {
+    if (!found || !photo) return;
+    setup = newSetup(cornersInPicture(found.cal, photo.width, photo.height), horizontal);
+    picked = null;
+  }
+
+  function grips(): { g: Grip; at: Vec2 }[] {
+    if (!found || !photo) return [];
+    const out: { g: Grip; at: Vec2 }[] = [];
+    if (coarse || !found.sure) cornersInPicture(found.cal, photo.width, photo.height).forEach((at, i) => out.push({ g: { kind: 'corner', i }, at }));
+    if (!coarse) {
+      SIGHTS.forEach((_, i) => out.push({ g: { kind: 'sight', i }, at: setup.hand[i] ?? found!.marks[i]?.at ?? found!.cal.sight(i) }));
+      if (found.sure) for (let r = 0; r < 4; r++) out.push({ g: { kind: 'nose', i: r }, at: noseHandle(found.cal, r) });
+    }
+    return out.map((x) => ({ g: x.g, at: toScreen(x.at) }));
+  }
+
+  const same = (a: Grip | null, b: Grip | null) => !!a && !!b && a.kind === b.kind && a.i === b.i;
+
+  /** Put what is held at a place in the picture and see at once what that does. */
+  function hold(g: Grip, p: Vec2) {
+    if (!photo || !found) return;
+    const { width: w, height: h } = photo;
+    const room = g.kind === 'corner' ? BEYOND : 0;
+    const at = { x: Math.max(-room * w, Math.min((1 + room) * w, p.x)), y: Math.max(-room * h, Math.min((1 + room) * h, p.y)) };
+    const put = <T,>(list: T[], v: T) => list.map((o, i) => (i === g.i ? v : o));
+    if (g.kind === 'corner') setup = { ...setup, rough: put(setup.rough, at) };
+    else if (g.kind === 'sight') setup = { ...setup, hand: put<Vec2 | null>(setup.hand, at), off: put(setup.off, false) };
+    else setup = { ...setup, noses: put<Vec2 | null>(setup.noses, at) };
+    const cal = preview(w, h, setup, found);
+    found = { ...found, cal };
+    setFrame(cal);
+  }
 
   function button(text: string, cls: string, fn: () => void): HTMLButtonElement {
     const b = el('button', cls, text);
@@ -119,26 +197,79 @@ export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; p
     req?.cancel?.();
   }
 
+  function cornerHint(): string {
+    if (!found) return '';
+    if (coarse || !found.sure) {
+      const why = coarse ? '' : guessed ? 'Chưa dò được hình thoi. ' : 'Không tự tìm được bàn. ';
+      return `${why}Kéo 4 vòng lớn tới gần 4 lỗ góc, chấm vàng nằm ở 2 lỗ giữa; app sẽ tự dò hình thoi.${coarse ? '' : ' Không thấy đủ góc thì kéo các vòng nhỏ vào đúng hình thoi.'}`;
+    }
+    const astray = SIGHTS.filter((_, i) => setup.hand[i] && found!.cal.off[i] > ASTRAY).length;
+    return `${describeFrame(found)} ${astray ? 'Vòng đỏ lệch so với các hình thoi khác: xem lại.' : 'Vòng nào sai thì kéo vào đúng hình thoi; vạch xanh phải nằm trên mép băng.'}`;
+  }
+
+  /** What the picture is fitted to changes with these, and only then. */
+  let shown = '';
+  const showing = () => `${step} ${coarse} ${!found || found.sure}`;
+  function refresh() {
+    renderChrome();
+    if (showing() !== shown) layoutCanvas();
+    else draw();
+  }
+
   function renderChrome() {
     picker.replaceChildren();
     actions.replaceChildren();
     if (step === 'corners') {
-      hint.textContent = found
-        ? 'Kéo 4 điểm tròn tới 4 lỗ góc. Hai chấm vàng phải nằm ở 2 lỗ giữa; nếu không, bấm "Đổi băng dài".'
-        : 'Không tự tìm được bàn. Kéo 4 điểm tròn tới 4 lỗ góc. Hai chấm vàng phải nằm ở 2 lỗ giữa.';
+      hint.textContent = cornerHint();
+      const g = picked;
+      if (g && found && g.kind === 'sight') {
+        const used = !!setup.hand[g.i] || (!!found.marks[g.i] && !setup.off[g.i]);
+        picker.append(
+          button(used ? 'Bỏ chấm này' : 'Dùng chấm này', 'pill', () => {
+            const at = found!.cal.sight(g.i);
+            setup = { ...setup, hand: setup.hand.map((v, i) => (i === g.i ? (used ? null : at) : v)), off: setup.off.map((v, i) => (i === g.i ? used : v)) };
+            find();
+            refresh();
+          }),
+        );
+      }
+      if (g && found && ((g.kind === 'sight' && setup.hand[g.i]) || (g.kind === 'nose' && setup.noses[g.i]))) {
+        picker.append(
+          button('Để app tự dò', 'pill', () => {
+            setup = g.kind === 'sight' ? { ...setup, hand: setup.hand.map((v, i) => (i === g.i ? null : v)) } : { ...setup, noses: setup.noses.map((v, i) => (i === g.i ? null : v)) };
+            find();
+            refresh();
+          }),
+        );
+      }
+      picker.append(
+        button(coarse || !found?.sure ? 'Dò hình thoi' : 'Kéo 4 góc', 'pill', () => {
+          const again = coarse || !found?.sure;
+          restart(setup.horizontal);
+          if (again) {
+            coarse = false;
+            find();
+          } else {
+            coarse = true;
+            found = { ...found!, marks: SIGHTS.map(() => null), noses: [null, null, null, null], sure: false, cal: preview(photo!.width, photo!.height, setup, { ...found!, marks: SIGHTS.map(() => null), noses: [null, null, null, null] }) };
+            setFrame(found.cal);
+          }
+          refresh();
+        }),
+        button('Đổi băng dài', 'pill', () => {
+          restart(!setup.horizontal);
+          find();
+          refresh();
+        }),
+      );
       actions.append(
         button('Hủy', 'ghost', close),
-        button('Đổi băng dài', 'ghost', () => {
-          horizontal = !horizontal;
-          draw();
-        }),
         button('Tìm bi', 'primary', () => {
           if (!raster) return;
-          markers = detectBalls(raster, corners, horizontal, deps.mode()).map((f) => ({ pos: f.pos, id: f.id }));
+          markers = detectBalls(straightenImage(raster, frame.lens), frame.corners, frame.horizontal, deps.mode()).map((f) => ({ pos: f.pos, id: f.id }));
           selected = -1;
           step = 'review';
-          renderChrome();
-          draw();
+          refresh();
         }),
       );
       return;
@@ -171,10 +302,11 @@ export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; p
       );
     }
     actions.append(
-      button('← Góc', 'ghost', () => {
+      button('← Khung', 'ghost', () => {
         step = 'corners';
-        renderChrome();
-        draw();
+        picked = null;
+        if (!found) find();
+        refresh();
       }),
       ...(frameReq
         ? [
@@ -190,7 +322,7 @@ export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; p
       button(frameReq ? frameReq.doneLabel : `Đặt ${named} bi lên bàn`, 'primary', () => {
         if (frameReq) {
           const req = frameReq;
-          const choice: FrameChoice = { corners, horizontal, markers };
+          const choice: FrameChoice = { frame, setup, markers };
           frameReq = null;
           close();
           req.done(choice);
@@ -208,48 +340,87 @@ export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; p
     const dpr = window.devicePixelRatio || 1;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, cssW, cssH);
-    ctx.drawImage(photo, view.ox, view.oy, photo.width * view.scale, photo.height * view.scale);
-    const h = homog();
-    const pt = (x: number, y: number) => toScreen(applyH(h, { x, y }));
-    // Outline of the playing surface.
-    const quad = corners.map(toScreen);
+    ctx.drawImage(photo, fit.ox, fit.oy, photo.width * fit.scale, photo.height * fit.scale);
+    if (!view) return;
+    const v = view;
+    /** A straight line on the table, which a lens may bend. */
+    const line = (a: Vec2, b: Vec2) => {
+      for (let k = 0; k <= 16; k++) {
+        const q = toScreen(v.toRaw({ x: a.x + ((b.x - a.x) * k) / 16, y: a.y + ((b.y - a.y) * k) / 16 }));
+        if (k) ctx.lineTo(q.x, q.y);
+        else ctx.moveTo(q.x, q.y);
+      }
+    };
+    if (step === 'corners') {
+      ctx.beginPath();
+      for (let k = 1; k < 8; k++) line({ x: (k * L) / 8, y: 0 }, { x: (k * L) / 8, y: W });
+      for (let k = 1; k < 4; k++) line({ x: 0, y: (k * W) / 4 }, { x: L, y: (k * W) / 4 });
+      ctx.strokeStyle = 'rgba(242,194,48,0.4)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+    // The cushions' edges.
     ctx.beginPath();
-    quad.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
-    ctx.closePath();
-    ctx.strokeStyle = step === 'corners' ? '#f2c230' : 'rgba(242,194,48,0.45)';
-    ctx.lineWidth = 2;
+    for (const [a, b] of [[0, 0, L, 0], [L, 0, L, W], [L, W, 0, W], [0, W, 0, 0]].map(([p, q, r, t]) => [{ x: p, y: q }, { x: r, y: t }])) line(a, b);
+    ctx.strokeStyle = step === 'corners' ? '#4fd1e8' : 'rgba(79,209,232,0.45)';
+    ctx.lineWidth = 1.5;
     ctx.stroke();
 
     if (step === 'corners') {
-      for (const s of [pt(L / 2, 0), pt(L / 2, W)]) {
+      if (!found) return;
+      for (const s of [{ x: L / 2, y: 0 }, { x: L / 2, y: W }].map((p) => toScreen(v.toRaw(p)))) {
         ctx.beginPath();
-        ctx.arc(s.x, s.y, 6, 0, Math.PI * 2);
+        ctx.arc(s.x, s.y, 4, 0, Math.PI * 2);
         ctx.fillStyle = '#f2c230';
         ctx.fill();
         ctx.strokeStyle = '#0e1512';
         ctx.lineWidth = 1.5;
         ctx.stroke();
       }
-      quad.forEach((p, i) => {
+      let held: Vec2 | null = null;
+      for (const { g, at } of grips()) {
+        const on = same(g, grip);
+        const chosen = on || same(g, picked);
+        if (on) held = at;
+        if (g.kind === 'corner') {
+          ctx.beginPath();
+          ctx.arc(at.x, at.y, on ? 20 : 15, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(242,194,48,0.18)';
+          ctx.fill();
+          ctx.strokeStyle = '#fff';
+          ctx.lineWidth = 2.5;
+          ctx.stroke();
+          continue;
+        }
+        if (g.kind === 'nose') {
+          ctx.beginPath();
+          ctx.rect(at.x - 5, at.y - 5, 10, 10);
+          ctx.fillStyle = setup.noses[g.i] ? '#4fd1e8' : 'rgba(14,21,18,0.55)';
+          ctx.fill();
+          ctx.strokeStyle = chosen ? '#fff' : '#4fd1e8';
+          ctx.lineWidth = chosen ? 3 : 2;
+          ctx.stroke();
+          continue;
+        }
+        const mark = setup.hand[g.i] || (!setup.off[g.i] && found.marks[g.i]);
+        const astray = !!setup.hand[g.i] && found.cal.off[g.i] > ASTRAY && found.sure;
         ctx.beginPath();
-        ctx.arc(p.x, p.y, i === dragging ? 20 : 15, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(242,194,48,0.18)';
-        ctx.fill();
-        ctx.strokeStyle = '#fff';
-        ctx.lineWidth = 2.5;
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, 2, 0, Math.PI * 2);
-        ctx.fillStyle = '#fff';
-        ctx.fill();
-      });
-      if (dragging >= 0) loupe(quad[dragging]);
+        ctx.arc(at.x, at.y, on ? 12 : 8, 0, Math.PI * 2);
+        ctx.setLineDash(mark ? [] : [3, 3]);
+        for (const [w, c] of [[4, 'rgba(14,21,18,0.7)'], [chosen ? 2.6 : 2, astray ? '#ef6b5e' : !mark ? '#c9c9c9' : setup.hand[g.i] ? '#fff' : '#7ee08a']] as const) {
+          ctx.lineWidth = w;
+          ctx.strokeStyle = c;
+          ctx.stroke();
+        }
+        ctx.setLineDash([]);
+      }
+      if (held) loupe(held);
       return;
     }
     markers.forEach((m, i) => {
-      const c = pt(m.pos.x, m.pos.y);
-      const e = pt(m.pos.x + R, m.pos.y);
-      const f = pt(m.pos.x, m.pos.y + R);
+      const c = ballAt(m.pos);
+      const e = ballAt({ x: m.pos.x + R, y: m.pos.y });
+      const f = ballAt({ x: m.pos.x, y: m.pos.y + R });
       const r = Math.max(9, Math.max(Math.hypot(e.x - c.x, e.y - c.y), Math.hypot(f.x - c.x, f.y - c.y)) * 1.25);
       ctx.beginPath();
       ctx.arc(c.x, c.y, r, 0, Math.PI * 2);
@@ -284,7 +455,7 @@ export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; p
     const cx = at.x < cssW / 2 ? cssW - r - 8 : r + 8;
     const cy = r + 8;
     const p = toPhoto(at);
-    const half = r / (view.scale * zoom);
+    const half = r / (fit.scale * zoom);
     ctx.save();
     ctx.beginPath();
     ctx.arc(cx, cy, r, 0, Math.PI * 2);
@@ -310,6 +481,7 @@ export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; p
 
   function layoutCanvas() {
     if (!photo) return;
+    shown = showing();
     const r = stage.getBoundingClientRect();
     cssW = Math.floor(r.width);
     cssH = Math.floor(r.height);
@@ -317,8 +489,25 @@ export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; p
     canvas.width = Math.max(1, Math.round(cssW * dpr));
     canvas.height = Math.max(1, Math.round(cssH * dpr));
     const pad = 22;
-    const f = fitImage(photo.width, photo.height, Math.max(1, cssW - 2 * pad), Math.max(1, cssH - 2 * pad));
-    view = { scale: f.scale, ox: f.ox + pad, oy: f.oy + pad };
+    // Corners outside the picture need room to be taken hold of.
+    const loose = coarse || (!!found && !found.sure);
+    const pts = loose ? setup.rough : [];
+    const room = (v: number, max: number) => Math.max(-BEYOND * max, Math.min((1 + BEYOND) * max, v));
+    let x0 = Math.min(0, ...pts.map((p) => room(p.x, photo!.width)));
+    let x1 = Math.max(photo.width, ...pts.map((p) => room(p.x, photo!.width)));
+    let y0 = Math.min(0, ...pts.map((p) => room(p.y, photo!.height)));
+    let y1 = Math.max(photo.height, ...pts.map((p) => room(p.y, photo!.height)));
+    if (!loose && view) {
+      // The table is known: show it as large as it goes, rails and all.
+      const edge = [[-RAILS, -RAILS], [L + RAILS, -RAILS], [L + RAILS, W + RAILS], [-RAILS, W + RAILS]].map(([x, y]) => view!.toRaw({ x, y }));
+      const a = Math.max(0, Math.min(...edge.map((p) => p.x)));
+      const b = Math.min(photo.width, Math.max(...edge.map((p) => p.x)));
+      const c = Math.max(0, Math.min(...edge.map((p) => p.y)));
+      const d = Math.min(photo.height, Math.max(...edge.map((p) => p.y)));
+      if (b - a > 40 && d - c > 40) [x0, x1, y0, y1] = [a, b, c, d];
+    }
+    const f = fitImage(x1 - x0, y1 - y0, Math.max(1, cssW - 2 * pad), Math.max(1, cssH - 2 * pad));
+    fit = { scale: f.scale, ox: f.ox + pad - x0 * f.scale, oy: f.oy + pad - y0 * f.scale };
     draw();
   }
   new ResizeObserver(() => {
@@ -334,21 +523,32 @@ export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; p
     const p = local(e);
     e.preventDefault();
     if (step === 'corners') {
-      dragging = nearestIndex(corners.map(toScreen), p, GRAB_PX);
-      if (dragging >= 0) canvas.setPointerCapture?.(e.pointerId);
+      const all = grips();
+      const k = nearestIndex(all.map((x) => x.at), p, GRAB_PX);
+      picked = k >= 0 ? all[k].g : null;
+      // Nothing moves until the finger does, and then by as much as the finger: no jump to its tip.
+      moved = false;
+      if (k >= 0) {
+        grip = all[k].g;
+        grab = { x: all[k].at.x - p.x, y: all[k].at.y - p.y };
+        from = p;
+        canvas.setPointerCapture?.(e.pointerId);
+      }
+      // The buttons follow on release: they must not push the picture about under the finger.
+      if (k < 0) renderChrome();
       draw();
       return;
     }
-    const h = homog();
-    const hit = nearestIndex(markers.map((m) => toScreen(applyH(h, m.pos))), p, 26);
+    if (!view) return;
+    const hit = nearestIndex(markers.map((m) => ballAt(m.pos)), p, 26);
     if (hit >= 0) {
       moving = { i: hit, from: p, on: false, wasSelected: hit === selected };
       selected = hit;
       canvas.setPointerCapture?.(e.pointerId);
     } else {
-      const t = applyH(invertH(h), toPhoto(p));
+      const t = ballFrom(p);
       if (t.x > 0 && t.x < L && t.y > 0 && t.y < W) {
-        markers = [...markers, { pos: { x: Math.max(R, Math.min(L - R, t.x)), y: Math.max(R, Math.min(W - R, t.y)) }, id: null }];
+        markers = [...markers, { pos: onBed(t), id: null }];
         selected = markers.length - 1;
       } else selected = -1;
     }
@@ -360,15 +560,17 @@ export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; p
       const q = local(e);
       if (!moving.on && Math.hypot(q.x - moving.from.x, q.y - moving.from.y) < 6) return;
       moving.on = true;
-      const t = applyH(invertH(homog()), toPhoto(q));
+      const t = onBed(ballFrom(q));
       const i = moving.i;
-      markers = markers.map((m, k) => (k === i ? { ...m, pos: { x: Math.max(R, Math.min(L - R, t.x)), y: Math.max(R, Math.min(W - R, t.y)) } } : m));
+      markers = markers.map((m, k) => (k === i ? { ...m, pos: t } : m));
       draw();
       return;
     }
-    if (dragging < 0 || !photo) return;
-    const p = toPhoto(local(e));
-    corners = corners.map((c, i) => (i === dragging ? { x: Math.max(0, Math.min(photo!.width, p.x)), y: Math.max(0, Math.min(photo!.height, p.y)) } : c));
+    if (!grip || !photo) return;
+    const q = local(e);
+    if (!moved && Math.hypot(q.x - from.x, q.y - from.y) < 4) return;
+    moved = true;
+    hold(grip, toPhoto({ x: q.x + grab.x, y: q.y + grab.y }));
     draw();
   });
   const release = () => {
@@ -380,10 +582,31 @@ export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; p
       draw();
       return;
     }
-    if (dragging < 0) return;
-    dragging = -1;
-    draw();
+    const g = grip;
+    grip = null;
+    if (!g) return;
+    if (moved && raster && found) {
+      if (g.kind === 'sight' && setup.hand[g.i]) {
+        const at = snapToSight(raster, found.cal, g.i, setup.hand[g.i]!);
+        setup = { ...setup, hand: setup.hand.map((v, i) => (i === g.i ? at : v)) };
+      }
+      find();
+    }
+    refresh();
   };
+  // Fine adjustment with the keyboard.
+  window.addEventListener('keydown', (e) => {
+    if (sheet.hidden || step !== 'corners' || !picked || !found) return;
+    const step1 = e.shiftKey ? 4 : 0.5;
+    const d = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[e.key];
+    if (!d) return;
+    e.preventDefault();
+    const now = grips().find((x) => same(x.g, picked));
+    if (!now) return;
+    const p = toPhoto(now.at);
+    hold(picked, { x: p.x + d[0] * step1, y: p.y + d[1] * step1 });
+    refresh();
+  });
   canvas.addEventListener('pointerup', release);
   canvas.addEventListener('pointercancel', release);
 
@@ -404,38 +627,38 @@ export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; p
     load(photo);
   }
 
-  /** Start on a picture: read its pixels and make a first guess at the corners. */
-  function load(source: HTMLCanvasElement, start?: { corners: Vec2[]; horizontal: boolean }) {
+  /** Start on a picture: read its pixels and find the table, unless it is known already. */
+  function load(source: HTMLCanvasElement, start?: { frame: TableFrame; setup: FrameSetup }) {
     photo = source;
     const { width: w, height: h } = source;
     const data = source.getContext('2d', { willReadFrequently: true })!.getImageData(0, 0, w, h);
     raster = { width: data.width, height: data.height, data: data.data };
-    const g = start ?? guessCorners(raster);
-    found = !!g;
-    if (g) {
-      corners = g.corners.map((c) => ({ x: Math.max(0, Math.min(w, c.x)), y: Math.max(0, Math.min(h, c.y)) }));
-      horizontal = g.horizontal;
+    found = null;
+    picked = null;
+    grip = null;
+    coarse = false;
+    if (start) {
+      setup = start.setup;
+      guessed = true;
+      setFrame(start.frame);
     } else {
-      corners = [
-        { x: w * 0.15, y: h * 0.15 },
-        { x: w * 0.85, y: h * 0.15 },
-        { x: w * 0.85, y: h * 0.85 },
-        { x: w * 0.15, y: h * 0.85 },
-      ];
-      horizontal = w >= h;
+      const g = guessCorners(raster);
+      guessed = !!g;
+      const at = (x: number, y: number) => ({ x: x * w, y: y * h });
+      setup = newSetup(g ? g.corners : [at(0.15, 0.15), at(0.85, 0.15), at(0.85, 0.85), at(0.15, 0.85)], g ? g.horizontal : w >= h);
     }
+    if (step === 'corners') find();
     renderChrome();
     layoutCanvas();
   }
 
-  function openFrame(frame: HTMLCanvasElement, req: FrameRequest) {
+  function openFrame(source: HTMLCanvasElement, req: FrameRequest) {
     frameReq = req;
     sheet.hidden = false;
-    step = 'corners';
+    step = req.start && req.markers ? 'review' : 'corners';
     selected = -1;
     markers = req.markers ? req.markers.map((m) => ({ ...m })) : [];
-    if (req.start && req.markers) step = 'review';
-    load(frame, req.start);
+    load(source, req.start);
   }
 
   input.addEventListener('change', () => {

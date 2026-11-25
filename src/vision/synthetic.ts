@@ -3,6 +3,7 @@ import { POCKET_IDS, pocketCenter } from '../core/table';
 import type { Vec2 } from '../core/types';
 import { applyH, invertH } from './homography';
 import { makeRaster, type Raster } from './raster';
+import { RISE, SIGHTS, sightSpot } from './sights';
 import { CUSHION_WIDTH, tableToImage } from './table';
 
 const { L, W, R } = TABLE;
@@ -75,7 +76,7 @@ const unit = (a: V): V => mul(a, 1 / Math.hypot(a[0], a[1], a[2]));
 const STANDARD_SET: Record<number, V> = { 0: [0.93, 0.92, 0.86], 1: [0.95, 0.74, 0.06], 2: [0.08, 0.2, 0.65], 3: [0.82, 0.08, 0.1], 4: [0.32, 0.13, 0.5], 5: [0.95, 0.42, 0.07], 6: [0.03, 0.34, 0.17], 7: [0.45, 0.07, 0.1], 8: [0.03, 0.03, 0.03] };
 const TV_SET: Record<number, V> = { ...STANDARD_SET, 2: [0.1, 0.28, 0.75], 4: [0.95, 0.42, 0.55], 5: [0.95, 0.22, 0.06], 6: [0.02, 0.22, 0.13], 7: [0.45, 0.22, 0.1] };
 
-export type PhotoOptions = { width: number; height: number; from: V; at: V; /** Across the long side, radians. */ fov: number; cloth: V; tv?: boolean; tint?: V; noise?: number };
+export type PhotoOptions = { width: number; height: number; from: V; at: V; /** Across the long side, radians. */ fov: number; cloth: V; tv?: boolean; tint?: V; noise?: number; /** Light diamonds on the rails, this far behind the noses. */ sights?: number };
 
 /**
  * A photo of the table by a person standing beside it: round balls on a bed below raised cushions,
@@ -98,6 +99,7 @@ export function photograph(o: PhotoOptions, balls: FakeBall[], horizontal: boole
   const solids = balls.map((b, i) => ({ id: b.id, c: [b.pos.x, b.pos.y, R] as V, axis: unit([Math.cos(i * 2.4), Math.sin(i * 2.4), 0.4 * Math.sin(i * 1.7)]) }));
   let seed = 7;
   const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const spots = o.sights === undefined ? [] : SIGHTS.map((_, i) => sightSpot(i, o.sights));
   const trace = (px: number, py: number): V => {
     const dir = unit(add(fw, add(mul(rt, (px - o.width / 2) / f), mul(dn, (py - o.height / 2) / f))));
     let near = Infinity;
@@ -128,6 +130,8 @@ export function photograph(o: PhotoOptions, balls: FakeBall[], horizontal: boole
     if (dir[2] >= 0) return [0.2, 0.17, 0.15];
     const on = (z: number): V => add(o.from, mul(dir, (z - o.from[2]) / dir[2]));
     const beyond = (p: V) => Math.max(-p[0], p[0] - L, -p[1], p[1] - W);
+    const rail = on(nose + RISE);
+    if (spots.some((q) => Math.hypot(rail[0] - q.x, rail[1] - q.y) < 0.006)) return mul([0.8, 0.78, 0.72], light(rail, [0, 0, 1]));
     const top = on(nose);
     const up = beyond(top);
     const p = up > 0 ? top : on(0);

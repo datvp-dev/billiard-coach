@@ -1,16 +1,19 @@
+import { TABLE } from '../core/config';
 import type { GameMode, Layout, Vec2 } from '../core/types';
 import { parseLiveLink } from '../live/link';
 import { createTracker, type LiveStatus, type Tracker } from '../live/tracker';
 import type { ViewSignature } from '../live/view';
 import type { ClothModel } from '../vision/balls';
-import { applyH } from '../vision/homography';
-import { tableToImage } from '../vision/table';
+import { BALL_Z } from '../vision/balls';
+import { frameView, type TableFrame } from '../vision/frame';
 import type { LiveReply } from '../worker/live.worker';
 import { createLiveClient } from '../worker/liveClient';
+import { scaleSetup, type FrameSetup } from './frameSetup';
 import type { FrameChoice, FrameRequest } from './photo';
 import type { StorageLike } from './state';
 import { ballColor } from './tableView';
 
+const { L, W } = TABLE;
 const LINK_KEY = 'billiard-coach:live:v1';
 /** Longest side of the frames that are read. */
 const MAX_SIDE = 1600;
@@ -34,8 +37,13 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls = '', text = ''):
   return e;
 }
 
-/** Corners as shares of the frame, so a change of resolution does not move them. */
-type Choice = { corners: Vec2[]; horizontal: boolean; aspect: number };
+/** Places as shares of the frame, so a change of resolution does not move them. */
+type Choice = { frame: TableFrame; setup: FrameSetup; aspect: number };
+
+/** The choice on a frame of this size, in pixels. */
+function sized(c: Choice, w: number, h: number): { frame: TableFrame; setup: FrameSetup } {
+  return { frame: { ...c.frame, corners: c.frame.corners.map((p) => ({ x: p.x * w, y: p.y * h })) }, setup: scaleSetup(c.setup, w, h) };
+}
 
 export type LivePanelDeps = {
   root: HTMLElement;
@@ -173,13 +181,13 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
     deps.place(layout);
   }
 
-  const same = (a: Vec2[], b: Vec2[]) => a.every((p, i) => Math.hypot(p.x - b[i].x, p.y - b[i].y) < 0.5);
+  const same = (a: TableFrame, b: TableFrame) => a.horizontal === b.horizontal && Math.abs(a.lens.k - b.lens.k) < 0.002 && a.corners.every((p, i) => Math.hypot(p.x - b.corners[i].x, p.y - b.corners[i].y) < 0.5);
 
   /** The table as it is being read, on the current frame, to put right by hand. */
   function editBalls() {
     if (!choice || !tracker || !ready()) return;
     const frame = grab();
-    const start = { corners: choice.corners.map((c) => ({ x: c.x * frame.width, y: c.y * frame.height })), horizontal: choice.horizontal };
+    const start = sized(choice, frame.width, frame.height);
     const mine = run;
     editing = true;
     deps.openFrame(frame, {
@@ -190,7 +198,7 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
       done: (c) => {
         editing = false;
         if (mine !== run || !tracker) return;
-        if (!same(c.corners, start.corners) || c.horizontal !== start.horizontal) return follow(c, frame);
+        if (!same(c.frame, start.frame)) return follow(c, frame);
         edits++;
         stale = true;
         put(tracker.correct(c.markers));
@@ -204,7 +212,7 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
     if (!choice || !tracker || !ready() || editing) return;
     const frame = grab();
     const { width, height } = frame;
-    const start = { corners: choice.corners.map((c) => ({ x: c.x * width, y: c.y * height })), horizontal: choice.horizontal };
+    const start = sized(choice, width, height);
     const mine = run;
     const t = tracker;
     editing = true;
@@ -212,7 +220,7 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
     const img = frame.getContext('2d', { willReadFrequently: true })!.getImageData(0, 0, width, height);
     let r: LiveReply | null = null;
     try {
-      r = await client.look({ width, height, data: img.data, corners: start.corners, horizontal: start.horizontal, mode: deps.mode(), check: [], ref, cloth, sure: [], renew: false });
+      r = await client.look({ width, height, data: img.data, ...start.frame, mode: deps.mode(), check: [], ref, cloth, sure: [], renew: false });
     } catch {
       // told below
     }
@@ -234,7 +242,7 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
       done: (c) => {
         editing = false;
         if (mine !== run || tracker !== t) return;
-        if (!same(c.corners, start.corners) || c.horizontal !== start.horizontal) return follow(c, frame);
+        if (!same(c.frame, start.frame)) return follow(c, frame);
         edits++;
         // With nobody over the table this frame is also the better one to compare with from now on.
         if (!crowded) return follow(c, frame, t);
@@ -309,9 +317,9 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
       return;
     }
     const frame = grab();
-    const same = choice && Math.abs(choice.aspect - frame.width / frame.height) < 0.01;
+    const fits = choice && Math.abs(choice.aspect - frame.width / frame.height) < 0.01;
     deps.openFrame(frame, {
-      ...(choice && same ? { start: { corners: choice.corners.map((c) => ({ x: c.x * frame.width, y: c.y * frame.height })), horizontal: choice.horizontal } } : {}),
+      ...(choice && fits ? { start: sized(choice, frame.width, frame.height) } : {}),
       doneLabel: 'Theo dõi bàn này',
       done: (c) => follow(c, frame),
     });
@@ -321,7 +329,7 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
   function follow(c: FrameChoice, frame: HTMLCanvasElement, known: Tracker | null = null) {
     if (!stream) return;
     run++;
-    choice = { corners: c.corners.map((p) => ({ x: p.x / frame.width, y: p.y / frame.height })), horizontal: c.horizontal, aspect: frame.width / frame.height };
+    choice = { frame: { ...c.frame, corners: c.frame.corners.map((p) => ({ x: p.x / frame.width, y: p.y / frame.height })) }, setup: scaleSetup(c.setup, 1 / frame.width, 1 / frame.height), aspect: frame.width / frame.height };
     tracker = known ?? createTracker(deps.mode());
     ref = null;
     cloth = null;
@@ -366,7 +374,7 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
       const t = tracker;
       const asked = edits;
       try {
-        const r = await client.look({ width, height, data: img.data, corners: choice.corners.map((c) => ({ x: c.x * width, y: c.y * height })), horizontal: choice.horizontal, mode: deps.mode(), check: t.watched(), ref, cloth, sure: t.places(), renew: stale && t.status() === 'steady' });
+        const r = await client.look({ width, height, data: img.data, ...sized(choice, width, height).frame, mode: deps.mode(), check: t.watched(), ref, cloth, sure: t.places(), renew: stale && t.status() === 'steady' });
         if (mine !== run) return;
         // A frame with somebody over the table is no measure of what is always there: wait for a clear one.
         // After a correction the old one is wrong about which things are balls.
@@ -410,7 +418,9 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
     let sy = 0;
     let sw = vw;
     let sh = vh;
-    const quad = choice?.corners.map((c) => ({ x: c.x * vw, y: c.y * vh }));
+    const table = choice ? frameView(sized(choice, vw, vh).frame, vw, vh) : null;
+    // The cushions' edges, bent as the lens bends them.
+    const quad = table ? [[0, 0], [L, 0], [L, W], [0, W]].flatMap(([x, y], i, all) => [0, 1, 2, 3].map((k) => table.toRaw({ x: x + ((all[(i + 1) & 3][0] - x) * k) / 4, y: y + ((all[(i + 1) & 3][1] - y) * k) / 4 }))) : null;
     if (quad) {
       const xs = quad.map((p) => p.x);
       const ys = quad.map((p) => p.y);
@@ -429,7 +439,7 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
     }
     const k = cw / sw;
     ctx.drawImage(video, sx, sy, sw, sh, 0, 0, cw, ch);
-    if (!quad || !choice) return;
+    if (!quad || !table) return;
     const at = (p: Vec2) => ({ x: (p.x - sx) * k, y: (p.y - sy) * k });
     const away = tracker?.status() === 'away';
     ctx.strokeStyle = away ? 'rgba(239,107,94,0.8)' : 'rgba(242,194,48,0.8)';
@@ -443,12 +453,11 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
     ctx.closePath();
     ctx.stroke();
     if (away || !tracker) return;
-    const h = tableToImage(quad, choice.horizontal);
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.font = `700 ${9 * dpr}px system-ui, sans-serif`;
     for (const b of tracker.balls()) {
-      const q = at(applyH(h, b.pos));
+      const q = at(table.toRaw(b.pos, BALL_Z));
       const y = q.y - 15 * dpr;
       ctx.globalAlpha = b.hidden ? 0.5 : 1;
       ctx.beginPath();
@@ -533,7 +542,7 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
       tracker = null;
       ref = null;
       cloth = null;
-    stale = false;
+      stale = false;
       message = 'Đã đổi chế độ chơi. Bấm "Chọn khung bàn" để theo dõi lại.';
       render();
       message = '';

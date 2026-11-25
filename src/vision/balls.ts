@@ -9,7 +9,7 @@ import { tableToImage } from './table';
 
 const { L, W, R } = TABLE;
 /** Ball centres lie this far above the plane of the cushion noses, where the corners are marked. */
-const BALL_Z = R - PHYS.cushionH;
+export const BALL_Z = R - PHYS.cushionH;
 
 /** Discs below this are shadows, logos and scuffs; real balls score well above it. */
 const MIN_SCORE = 1.05;
@@ -419,6 +419,24 @@ export function surveyBed(img: Raster, corners: Vec2[], horizontal: boolean, kno
       if (fresh < 0.4 * total || fresh < 0.62 * (total - covered)) continue;
     }
     if (fresh < Math.min(0.42, 0.75 * top.fill) * total) continue;
+    // Nearer than two balls can lie, and what shows of it is of the other's colour: the same ball, drawn out.
+    const twin = spots.find((s) => Math.hypot(s.x - x0 - mx, s.y - y0 - my) < 0.9 * top.r && Math.hypot(s.pos.x - pos.x, s.pos.y - pos.y) < 1.95 * R);
+    if (twin) {
+      const tone = (px: number[]) => {
+        const m = [0, 0, 0];
+        for (const p of px) for (let k = 0; k < 3; k++) m[k] += avg[p * 3 + k];
+        const t = m[0] + m[1] + m[2] + 1e-6;
+        return [m[0] / t, m[1] / t];
+      };
+      const mine = tone(mark.filter((p) => !used[p] && ev[p] > 0.5));
+      const its: number[] = [];
+      const tr = twin.r * 0.6;
+      for (let y = Math.max(0, Math.ceil(twin.y - y0 - tr)); y <= Math.min(bh - 1, twin.y - y0 + tr); y++) {
+        for (let x = Math.max(0, Math.ceil(twin.x - x0 - tr)); x <= Math.min(bw - 1, twin.x - x0 + tr); x++) its.push(y * bw + x);
+      }
+      const other = tone(its);
+      if (Math.hypot(mine[0] - other[0], mine[1] - other[1]) < 0.09) continue;
+    }
     // A worn or chalky patch: the cloth's own colour, no darker or lighter than cloth gets.
     if (coloured && top.score < 1.2 && mark.length > 0) {
       const m = [0, 0, 0];

@@ -352,7 +352,7 @@ test('looks asked for at the same time are answered one after another, each with
     terminate() {},
   };
   const c = createLiveClient(() => fake as unknown as Worker);
-  const ask = (width: number) => c.look({ width, height: 1, data: new Uint8ClampedArray(4), corners: [], horizontal: true, mode: '9', check: [], ref: null, cloth: null, sure: [], renew: false });
+  const ask = (width: number) => c.look({ width, height: 1, data: new Uint8ClampedArray(4), corners: [], horizontal: true, lens: { k: 0 }, mode: '9', check: [], ref: null, cloth: null, sure: [], renew: false });
   const both = Promise.all([ask(1), ask(2)]);
   const got = await both;
   expect(got.map((r) => r.cover)).toEqual([1, 2]);
