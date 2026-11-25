@@ -165,8 +165,15 @@ const polygonArea = (p: Vec2[]) => Math.abs(p.reduce((t, a, i) => t + a.x * p[(i
 function areasOf(small: Raster, cloth: ClothTone, lo: number, hi: number, tol: number, seams: boolean): ClothArea[] {
   const { width: w, height: h, data } = small;
   const mask = new Uint8Array(w * h);
+  // The face of a far cushion is the cloth in deep shade: much darker, but the same hue and no paler.
+  const [clothHue, clothSat] = rgbToHsv(cloth.cr, cloth.cg, Math.max(0, 1 - cloth.cr - cloth.cg));
   for (let p = 0; p < w * h; p++) {
     const i = p * 4;
+    if (cloth.sat >= 0.45) {
+      const [hue, sat, v] = rgbToHsv(data[i], data[i + 1], data[i + 2]);
+      const off = Math.abs(hue - clothHue) % 360;
+      if (v > 0.1 && v < cloth.lum * 3 && Math.min(off, 360 - off) < 14 && sat > clothSat - 0.1) mask[p] = 1;
+    }
     const sum = data[i] + data[i + 1] + data[i + 2] + 1e-6;
     const ratio = sum / 765 / cloth.lum;
     if (ratio > lo && ratio < hi && Math.hypot(data[i] / sum - cloth.cr, data[i + 1] / sum - cloth.cg) < tol) mask[p] = 1;

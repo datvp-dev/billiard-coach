@@ -1,6 +1,7 @@
 import './style.css';
 import { createCards } from './ui/cards';
 import { attachDrag } from './ui/drag';
+import type { Layout } from './core/types';
 import { createLivePanel } from './ui/livePanel';
 import { createPhotoImport } from './ui/photo';
 import { sampleAt, simDuration } from './ui/replay';
@@ -179,12 +180,16 @@ const cards = createCards(cardsWrap, {
 });
 
 // --- Following a live stream ---
+/** The last table that came from the stream; anything else on the board was put there by hand. */
+let liveLayout: Layout | null = null;
+let editTimer: ReturnType<typeof setTimeout> | null = null;
 const live = createLivePanel({
   root: livePanel,
   storage,
   mode: () => store.get().layout.mode,
   place(layout) {
     stopReplay();
+    liveLayout = layout;
     store.setLayout(layout);
   },
   openFrame: (frame, req) => photoImport.openFrame(frame, req),
@@ -192,6 +197,13 @@ const live = createLivePanel({
 });
 liveBtn.addEventListener('click', () => live.toggle());
 let liveMode = store.get().layout.mode;
+store.subscribe((s) => {
+  // Dragging a ball or tapping the tray corrects what was read. Shots played in the app are only
+  // tried out, and do not count.
+  if (editTimer !== null) clearTimeout(editTimer);
+  editTimer = null;
+  if (liveLayout && s.layout !== liveLayout && s.steps === 0) editTimer = setTimeout(() => live.edited(store.get().layout), 400);
+});
 store.subscribe((s) => {
   if (s.layout.mode === liveMode) return;
   liveMode = s.layout.mode;

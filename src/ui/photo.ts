@@ -55,8 +55,11 @@ async function decode(file: Blob): Promise<HTMLCanvasElement> {
  * corner pockets up, then check the balls that were found and fix their numbers.
  */
 export type FrameChoice = { corners: Vec2[]; horizontal: boolean; markers: Marker[] };
-/** A still frame of a video to mark the table on; `start` reuses an earlier choice. */
-export type FrameRequest = { start?: { corners: Vec2[]; horizontal: boolean }; doneLabel: string; done(choice: FrameChoice): void };
+/**
+ * A still frame of a video to mark the table on; `start` reuses an earlier choice, and `markers`
+ * goes straight to checking those balls.
+ */
+export type FrameRequest = { start?: { corners: Vec2[]; horizontal: boolean }; markers?: Marker[]; doneLabel: string; done(choice: FrameChoice): void; cancel?(): void };
 
 export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; place(layout: Layout): void }): { pick(): void; openFrame(frame: HTMLCanvasElement, req: FrameRequest): void } {
   const input = el('input');
@@ -88,6 +91,8 @@ export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; p
   let markers: Marker[] = [];
   let selected = -1;
   let dragging = -1;
+  /** A ball being moved by hand: which one, where the finger started, and whether it has moved. */
+  let moving: { i: number; from: Vec2; on: boolean; wasSelected: boolean } | null = null;
   let frameReq: FrameRequest | null = null;
   let cssW = 0;
   let cssH = 0;
@@ -109,7 +114,9 @@ export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; p
     photo = null;
     raster = null;
     markers = [];
+    const req = frameReq;
     frameReq = null;
+    req?.cancel?.();
   }
 
   function renderChrome() {
@@ -141,7 +148,7 @@ export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; p
     hint.textContent =
       markers.length === 0
         ? 'Không thấy bi nào. Chạm vào ảnh ở chỗ có bi để thêm, hoặc quay lại chỉnh góc.'
-        : `Thấy ${markers.length} bi. Chạm vào một bi để sửa số; chạm chỗ trống để thêm bi.${unknown ? ` Còn ${unknown} bi "?" chưa có số sẽ bị bỏ qua.` : ''}`;
+        : `Thấy ${markers.length} bi. Chạm vào một bi để sửa số, kéo để dời; chạm chỗ trống để thêm bi.${unknown ? ` Còn ${unknown} bi "?" chưa có số sẽ bị bỏ qua.` : ''}`;
     if (selected >= 0 && markers[selected]) {
       const cur = markers[selected].id;
       for (const id of ballIdsForMode(deps.mode())) {
@@ -174,6 +181,7 @@ export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; p
         if (frameReq) {
           const req = frameReq;
           const choice: FrameChoice = { corners, horizontal, markers };
+          frameReq = null;
           close();
           req.done(choice);
           return;
@@ -323,8 +331,11 @@ export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; p
     }
     const h = homog();
     const hit = nearestIndex(markers.map((m) => toScreen(applyH(h, m.pos))), p, 26);
-    if (hit >= 0) selected = hit === selected ? -1 : hit;
-    else {
+    if (hit >= 0) {
+      moving = { i: hit, from: p, on: false, wasSelected: hit === selected };
+      selected = hit;
+      canvas.setPointerCapture?.(e.pointerId);
+    } else {
       const t = applyH(invertH(h), toPhoto(p));
       if (t.x > 0 && t.x < L && t.y > 0 && t.y < W) {
         markers = [...markers, { pos: { x: Math.max(R, Math.min(L - R, t.x)), y: Math.max(R, Math.min(W - R, t.y)) }, id: null }];
@@ -335,12 +346,30 @@ export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; p
     draw();
   });
   canvas.addEventListener('pointermove', (e) => {
+    if (moving && photo) {
+      const q = local(e);
+      if (!moving.on && Math.hypot(q.x - moving.from.x, q.y - moving.from.y) < 6) return;
+      moving.on = true;
+      const t = applyH(invertH(homog()), toPhoto(q));
+      const i = moving.i;
+      markers = markers.map((m, k) => (k === i ? { ...m, pos: { x: Math.max(R, Math.min(L - R, t.x)), y: Math.max(R, Math.min(W - R, t.y)) } } : m));
+      draw();
+      return;
+    }
     if (dragging < 0 || !photo) return;
     const p = toPhoto(local(e));
     corners = corners.map((c, i) => (i === dragging ? { x: Math.max(0, Math.min(photo!.width, p.x)), y: Math.max(0, Math.min(photo!.height, p.y)) } : c));
     draw();
   });
   const release = () => {
+    if (moving) {
+      // A tap on the ball that was already chosen lets go of it.
+      if (!moving.on && moving.wasSelected) selected = -1;
+      moving = null;
+      renderChrome();
+      draw();
+      return;
+    }
     if (dragging < 0) return;
     dragging = -1;
     draw();
@@ -394,6 +423,8 @@ export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; p
     sheet.hidden = false;
     step = 'corners';
     selected = -1;
+    markers = req.markers ? req.markers.map((m) => ({ ...m })) : [];
+    if (req.start && req.markers) step = 'review';
     load(frame, req.start);
   }
 

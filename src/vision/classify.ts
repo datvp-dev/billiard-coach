@@ -17,7 +17,7 @@ export type BallLook = {
 };
 
 type Proto = { h: number; s: number; v: number };
-type Palette = { name: string; solid: Record<number, Proto>; /** Stripes are banded with black instead of white. */ darkStripes: boolean };
+type Palette = { name: string; solid: Record<number, Proto>; /** Other shades the same number comes in. */ also?: Record<number, Proto>; /** Stripes are banded with black instead of white. */ darkStripes: boolean };
 
 const PALETTES: Palette[] = [
   {
@@ -45,6 +45,9 @@ const PALETTES: Palette[] = [
       5: { h: 17, s: 0.75, v: 0.97 },
       6: { h: 165, s: 0.6, v: 0.36 },
       7: { h: 26, s: 0.45, v: 0.62 },
+    },
+    also: {
+      4: { h: 15, s: 0.56, v: 0.95 },
     },
   },
 ];
@@ -114,7 +117,9 @@ function fitCost(k: BallLook, id: number, pal: Palette): number {
   if (id === 0) return 4 * Math.max(0, 0.9 - k.white) + 3 * k.coloured + 2 * k.black;
   if (id === 8) return 4.5 * Math.max(0, 0.75 - k.black - 0.7 * Math.min(0.3, k.white)) + 2.5 * k.coloured;
   const stripe = id > 8;
-  const base = solidCost(k, pal.solid[stripe ? id - 8 : id]);
+  const n = stripe ? id - 8 : id;
+  const variant = pal.also?.[n];
+  const base = Math.min(solidCost(k, pal.solid[n]), variant ? solidCost(k, variant) + 0.1 : Infinity);
   const thin = 3 * Math.max(0, 0.25 - k.coloured);
   if (!stripe) return base + thin + 4 * Math.max(0, k.white - 0.3) + 3.5 * Math.max(0, k.black - 0.25);
   const band = pal.darkStripes ? Math.max(k.black, k.white) : k.white;

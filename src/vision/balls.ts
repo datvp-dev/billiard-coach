@@ -4,7 +4,7 @@ import type { GameMode, Vec2 } from '../core/types';
 import { cameraFromPlane, type Camera } from './camera';
 import { lightGain, lookOf, nameBalls, type BallLook } from './classify';
 import { applyH, homography, invertH } from './homography';
-import type { Raster } from './raster';
+import { rgbToHsv, type Raster } from './raster';
 import { tableToImage } from './table';
 
 const { L, W, R } = TABLE;
@@ -19,8 +19,18 @@ const CLEAR_SCORE = 1.28;
 /** A full set plus six pocket mouths, which are sorted out later, and some room. */
 const MAX_SPOTS = 26;
 
-export type FoundBall = { pos: Vec2; id: number | null; confidence: number };
-export type Spot = { pos: Vec2; x: number; y: number; r: number; score: number };
+export type FoundBall = {
+  pos: Vec2;
+  id: number | null;
+  confidence: number;
+  /** What its face looks like, for recognising it again. */
+  look?: BallLook;
+  /** Part of something much larger that reaches in over a rail: a player, an arm, a cue. */
+  attached?: boolean;
+};
+/** The cloth as seen when nobody is in the way, to compare later frames of the same view with. */
+export type ClothModel = { width: number; height: number; tile: number; tiles: Float32Array; whole: [number, number, number]; /** Large things that are always there: a rail's shadow, a caption over the picture. */ fixed: Uint8Array };
+export type Spot = { pos: Vec2; x: number; y: number; r: number; score: number; attached?: boolean };
 
 const median = (a: number[]) => (a.length ? a.sort((p, q) => p - q)[a.length >> 1] : 0);
 
@@ -51,9 +61,20 @@ export function locateBalls(img: Raster, corners: Vec2[], horizontal: boolean): 
 }
 
 /** The balls, and a way to ask whether a spot on the bed shows nothing but cloth. */
-export type Survey = { spots: Spot[]; clearAt(pos: Vec2): boolean; toTable(p: Vec2): Vec2 };
+export type Survey = {
+  spots: Spot[];
+  clearAt(pos: Vec2): boolean;
+  toTable(p: Vec2): Vec2;
+  cloth: ClothModel | null;
+  /** Share of the bed hidden by people reaching in. */
+  cover: number;
+};
 
-export function surveyBed(img: Raster, corners: Vec2[], horizontal: boolean): Survey {
+/**
+ * `known` is the cloth from an earlier, clear frame of the same view. `sure` are places that do
+ * hold balls, so that they are not taken for part of the furniture.
+ */
+export function surveyBed(img: Raster, corners: Vec2[], horizontal: boolean, known: ClothModel | null = null, sure: Vec2[] = []): Survey {
   const { width: w, height: h, data } = img;
   const camera = cameraFromPlane(tableToImage(corners, horizontal), w, h);
   const view = ballView(camera);
@@ -65,7 +86,7 @@ export function surveyBed(img: Raster, corners: Vec2[], horizontal: boolean): Su
   const y1 = Math.min(h, Math.ceil(Math.max(...corners.map((c) => c.y))));
   const bw = x1 - x0;
   const bh = y1 - y0;
-  const nothing: Survey = { spots: [], clearAt: () => false, toTable: (p) => view.toTable(p.x, p.y) };
+  const nothing: Survey = { spots: [], clearAt: () => false, toTable: (p) => view.toTable(p.x, p.y), cloth: null, cover: 0 };
   if (bw < 20 || bh < 20) return nothing;
   const inside = new Uint8Array(bw * bh);
   const turn = Math.sign((corners[1].x - corners[0].x) * (corners[2].y - corners[0].y) - (corners[1].y - corners[0].y) * (corners[2].x - corners[0].x)) || 1;
@@ -108,9 +129,11 @@ export function surveyBed(img: Raster, corners: Vec2[], horizontal: boolean): Su
     }
     return cr.length < 30 ? null : [median(cr), median(cg), median(lum)];
   };
-  const whole = sample(0, 0, bw, bh, Math.max(1, Math.floor(Math.min(bw, bh) / 90)));
+  const given = known && known.width === bw && known.height === bh && known.tile === tile ? known : null;
+  const whole = given ? given.whole : sample(0, 0, bw, bh, Math.max(1, Math.floor(Math.min(bw, bh) / 90)));
   if (!whole) return nothing;
-  for (let ty = 0; ty < th; ty++) {
+  if (given) cloth.set(given.tiles);
+  for (let ty = 0; !given && ty < th; ty++) {
     for (let tx = 0; tx < tw; tx++) {
       const pad = Math.round(tile * 0.6);
       let t = sample(tx * tile - pad, ty * tile - pad, (tx + 1) * tile + pad, (ty + 1) * tile + pad, step);
@@ -118,6 +141,23 @@ export function surveyBed(img: Raster, corners: Vec2[], horizontal: boolean): Su
       if (!t || Math.hypot(t[0] - whole[0], t[1] - whole[1]) > 0.06 || t[2] < whole[2] * 0.4 || t[2] > whole[2] * 2) t = whole;
       cloth.set(t, (ty * tw + tx) * 3);
     }
+  }
+  // The camera may have brightened or dimmed the picture since: go by what still looks like cloth.
+  let gain = 1;
+  if (given) {
+    const ratios: number[] = [];
+    const st = Math.max(1, Math.floor(Math.sqrt((bw * bh) / 6000)));
+    for (let y = 0; y < bh; y += st) {
+      for (let x = 0; x < bw; x += st) {
+        if (!inside[y * bw + x]) continue;
+        const o = (y * bw + x) * 3;
+        const t = (Math.min(th - 1, Math.floor(y / tile)) * tw + Math.min(tw - 1, Math.floor(x / tile))) * 3;
+        const sum = avg[o] + avg[o + 1] + avg[o + 2] + 1e-3;
+        const q = sum / (cloth[t + 2] + 1e-3);
+        if (q > 0.7 && q < 1.4 && Math.hypot(avg[o] / sum - cloth[t], avg[o + 1] / sum - cloth[t + 1]) < 0.03) ratios.push(q);
+      }
+    }
+    if (ratios.length > 200) gain = Math.min(1.25, Math.max(0.8, median(ratios)));
   }
   // How far every pixel is from the cloth around it: colour, and brightness in logarithms.
   const dc = new Float32Array(bw * bh);
@@ -138,7 +178,7 @@ export function surveyBed(img: Raster, corners: Vec2[], horizontal: boolean): Su
       const o = p * 3;
       const s = avg[o] + avg[o + 1] + avg[o + 2] + 1e-3;
       dc[p] = Math.hypot(avg[o] / s - at(0), avg[o + 1] / s - at(1));
-      dl[p] = Math.log((s + 6) / (at(2) + 6));
+      dl[p] = Math.log((s + 6) / (at(2) * gain + 6));
     }
   }
   // What counts as different depends on how noisy this cloth is.
@@ -153,23 +193,39 @@ export function surveyBed(img: Raster, corners: Vec2[], horizontal: boolean): Su
   }
   const tc = Math.min(0.06, Math.max(0.026, 4.5 * median(nc)));
   const tl = Math.min(0.25, Math.max(0.085, 4.5 * median(nl)));
+  // On a coloured cloth a shadow, however deep, keeps the cloth's hue and is at least as strong a
+  // colour (video makes it stronger still), and a black ball has neither. On grey cloth darkness
+  // is all there is to go by.
+  const [clothHue, clothSat] = rgbToHsv(whole[0], whole[1], Math.max(0, 1 - whole[0] - whole[1]));
+  const coloured = clothSat > 0.35;
+  const shaded = (o: number): boolean => {
+    const [h, sat, v] = rgbToHsv(avg[o], avg[o + 1], avg[o + 2]);
+    const gapH = Math.abs(h - clothHue) % 360;
+    return v > 0.05 && Math.min(gapH, 360 - gapH) < 24 && sat > clothSat - 0.12;
+  };
   const ev = new Float32Array(bw * bh);
   for (let p = 0; p < bw * bh; p++) {
     const l = dl[p];
-    const d = Math.hypot(dc[p] / tc, l > 0 ? l / tl : l / 0.75);
+    let d = Math.hypot(dc[p] / tc, l > 0 ? l / tl : l / 0.75);
+    if (coloured && d > 1 && l < -0.12 && shaded(p * 3)) d = 0;
     // Darker cloth may be a shadow: some evidence, not proof.
     ev[p] = d > 1 ? 1 : l < 0 ? 0.45 * Math.min(1, Math.max(0, (-l - 0.12) / 0.3)) : 0;
   }
 
+  // What was there on the clear frame and is no ball (lettering, a rail's shadow) says nothing.
+  if (given) for (let p = 0; p < bw * bh; p++) if (given.fixed[p]) inside[p] = 0;
+
   // Row sums make the share of evidence inside a disc cheap to look up.
   const rowE = new Float32Array((bw + 1) * bh);
   const rowN = new Float32Array((bw + 1) * bh);
+  const rowB = new Float32Array((bw + 1) * bh);
   for (let y = 0; y < bh; y++) {
     for (let x = 0; x < bw; x++) {
       const i = y * (bw + 1) + x;
       const p = y * bw + x;
       rowE[i + 1] = rowE[i] + (inside[p] ? ev[p] : 0);
       rowN[i + 1] = rowN[i] + inside[p];
+      rowB[i + 1] = rowB[i] + (inside[p] && dl[p] > tl ? 1 : 0);
     }
   }
   const disc = (cx: number, cy: number, r: number): [number, number] => {
@@ -211,11 +267,13 @@ export function surveyBed(img: Raster, corners: Vec2[], horizontal: boolean): Su
   // Connected areas of things that are not cloth: an arm or a sleeve is far larger than a few balls.
   const areaId = new Int32Array(bw * bh);
   const areaSize: number[] = [0];
+  const areaRim: number[] = [0];
   const stack = new Int32Array(bw * bh);
   for (let s = 0; s < bw * bh; s++) {
-    if (areaId[s] || !inside[s] || ev[s] !== 1) continue;
+    if (areaId[s] || !inside[s] || ev[s] !== 1 || given?.fixed[s]) continue;
     const id = areaSize.length;
     let n = 0;
+    let rim = 0;
     let t = 0;
     stack[t++] = s;
     areaId[s] = id;
@@ -224,14 +282,40 @@ export function surveyBed(img: Raster, corners: Vec2[], horizontal: boolean): Su
       n++;
       const x = p % bw;
       const next = (q: number) => {
-        if (!areaId[q] && inside[q] && ev[q] === 1) (areaId[q] = id), (stack[t++] = q);
+        if (!areaId[q] && inside[q] && ev[q] === 1 && !given?.fixed[q]) (areaId[q] = id), (stack[t++] = q);
       };
       if (x > 0) next(p - 1);
       if (x < bw - 1) next(p + 1);
       if (p >= bw) next(p - bw);
       if (p < bw * (bh - 1)) next(p + bw);
+      if (x === 0 || x === bw - 1 || p < bw || p >= bw * (bh - 1) || !inside[p - 1] || !inside[p + 1] || !inside[p - bw] || !inside[p + bw]) rim++;
     }
     areaSize.push(n);
+    areaRim.push(rim);
+  }
+  // Big, or reaching in over a rail and bigger than a few balls: somebody, or something they hold.
+  const oneBall = Math.PI * mid * mid;
+  const isPerson = (id: number) => id > 0 && (areaSize[id] > LARGE * oneBall || (areaSize[id] > 3.5 * oneBall && areaRim[id] > 0.7 * mid));
+  const fixed = given ? given.fixed : new Uint8Array(bw * bh);
+  let hidden = 0;
+  let bed = 0;
+  for (let p = 0; p < bw * bh; p++) {
+    if (!inside[p]) continue;
+    bed++;
+    if (!isPerson(areaId[p])) continue;
+    hidden++;
+    if (!given) fixed[p] = 1;
+  }
+  if (!given) {
+    for (const c of sure) {
+      const q = view.toImage(c);
+      const r = view.radius(c) * 1.3;
+      for (let y = Math.max(0, Math.floor(q.y - y0 - r)); y <= Math.min(bh - 1, q.y - y0 + r); y++) {
+        for (let x = Math.max(0, Math.floor(q.x - x0 - r)); x <= Math.min(bw - 1, q.x - x0 + r); x++) {
+          if ((x + x0 - q.x) ** 2 + (y + y0 - q.y) ** 2 <= r * r) fixed[y * bw + x] = 0;
+        }
+      }
+    }
   }
   const rate = (cx: number, cy: number): { score: number; pos: Vec2; r: number; fill: number } | null => {
     const pos = view.toTable(cx + x0, cy + y0);
@@ -245,7 +329,23 @@ export function surveyBed(img: Raster, corners: Vec2[], horizontal: boolean): Su
     const [e1, n1] = disc(cx, cy, r * 1.1);
     const ring = n2 > n1 ? (e2 - e1) / (n2 - n1) : 0;
     const edge = outline(cx, cy, r);
-    return { score: fill - 0.45 * ring + 0.6 * edge, pos, r, fill };
+    // A white ball on pale cloth: bright above, and its shaded underside passes through the very
+    // brightness of the cloth. The bright cap with an outline all round is enough.
+    let solid = fill;
+    if (fill < 0.8 && edge > 0.7) {
+      let lit = 0;
+      let cap = 0;
+      for (let y = Math.max(0, Math.ceil(cy - r * 0.9)); y <= Math.min(bh - 1, Math.floor(cy - r * 0.1)); y++) {
+        const half = Math.sqrt(Math.max(0, r * r * 0.81 - (y - cy) ** 2));
+        const a = Math.max(0, Math.min(bw, Math.round(cx - half)));
+        const b = Math.max(a, Math.min(bw, Math.round(cx + half) + 1));
+        const i = y * (bw + 1);
+        lit += rowB[i + b] - rowB[i + a];
+        cap += rowN[i + b] - rowN[i + a];
+      }
+      if (cap > 0 && lit / cap > 0.8) solid = (fill + lit / cap) / 2;
+    }
+    return { score: solid - 0.45 * ring + 0.6 * edge, pos, r, fill: solid };
   };
 
   const grid = Math.max(1, Math.round(mid / 8));
@@ -306,12 +406,27 @@ export function surveyBed(img: Raster, corners: Vec2[], horizontal: boolean): Su
       if (fresh < 0.4 * total || fresh < 0.62 * (total - covered)) continue;
     }
     if (fresh < Math.min(0.42, 0.75 * top.fill) * total) continue;
+    // A worn or chalky patch: the cloth's own colour, no darker or lighter than cloth gets.
+    if (coloured && top.score < 1.2 && mark.length > 0) {
+      const m = [0, 0, 0];
+      for (const p of mark) for (let k = 0; k < 3; k++) m[k] += avg[p * 3 + k] / mark.length;
+      const [hue, sat] = rgbToHsv(m[0], m[1], m[2]);
+      const off = Math.abs(hue - clothHue) % 360;
+      const light = mark.reduce((t, p) => t + dl[p], 0) / mark.length;
+      const spread = Math.sqrt(mark.reduce((t, p) => t + (dl[p] - light) ** 2, 0) / mark.length);
+      // A ball, even one of the cloth's colour, is lit on top and dark below.
+      if (Math.min(off, 360 - off) < 10 && sat > clothSat - 0.16 && Math.abs(light) < 0.3 && spread < 0.16) continue;
+    }
     for (const p of mark) used[p] = 1;
-    spots.push({ pos, x: mx + x0, y: my + y0, r: top.r, score: top.score });
+    let onPerson = 0;
+    for (const p of mark) if (isPerson(areaId[p])) onPerson++;
+    spots.push({ pos, x: mx + x0, y: my + y0, r: top.r, score: top.score, attached: onPerson > 0.15 * total });
   }
   return {
     spots,
     toTable: nothing.toTable,
+    cloth: { width: bw, height: bh, tile, tiles: cloth, whole, fixed },
+    cover: bed ? hidden / bed : 0,
     clearAt(pos) {
       const p = view.toImage(pos);
       const [e, n] = disc(p.x - x0, p.y - y0, view.radius(pos) * 0.9);
@@ -369,7 +484,9 @@ function facePixels(img: Raster, s: Spot, all: Spot[]): number[] {
 }
 
 export function findBalls(img: Raster, corners: Vec2[], horizontal: boolean, mode: GameMode): FoundBall[] {
-  return nameSpots(img, corners, horizontal, mode, locateBalls(img, corners, horizontal));
+    // On a single picture, round bits of something long beside a rail are lettering or the rail itself.
+  const spots = locateBalls(img, corners, horizontal).filter((s) => !s.attached || Math.min(s.pos.x, L - s.pos.x, s.pos.y, W - s.pos.y) > 1.6 * R);
+  return nameSpots(img, corners, horizontal, mode, spots);
 }
 
 /** Sorts out pocket mouths and gives the remaining spots their numbers. */
@@ -412,5 +529,11 @@ export function nameSpots(img: Raster, corners: Vec2[], horizontal: boolean, mod
     pos: { x: Math.max(R, Math.min(L - R, s.pos.x)), y: Math.max(R, Math.min(W - R, s.pos.y)) },
     id: names[i].id,
     confidence: names[i].confidence,
+    look: looks[i],
+    attached: !!s.attached,
+  })).filter((b) => b.id !== null || !POCKET_IDS.some((id) => {
+    // Nets, leather and castings in a pocket's mouth look like nothing in particular.
+    const c = pocketCenter(id);
+    return Math.hypot(b.pos.x - c.x, b.pos.y - c.y) < (isSidePocket(id) ? 1.8 : 2.4) * R;
   }));
 }

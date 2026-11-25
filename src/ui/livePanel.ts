@@ -2,6 +2,7 @@ import type { GameMode, Layout, Vec2 } from '../core/types';
 import { parseLiveLink } from '../live/link';
 import { createTracker, type LiveStatus, type Tracker } from '../live/tracker';
 import type { ViewSignature } from '../live/view';
+import type { ClothModel } from '../vision/balls';
 import { applyH } from '../vision/homography';
 import { tableToImage } from '../vision/table';
 import { createLiveClient } from '../worker/liveClient';
@@ -19,6 +20,7 @@ const STATUS_TEXT: Record<LiveStatus, string> = {
   away: 'Đang chiếu góc máy khác. Chờ quay lại khung bàn đã chọn.',
   moving: 'Bi đang lăn…',
   settling: 'Đang đọc thế bi…',
+  blocked: 'Có người che bàn. Giữ thế bi cũ tới khi nhìn rõ.',
   steady: 'Đang theo dõi. Bàn khớp với luồng.',
 };
 
@@ -46,7 +48,7 @@ export type LivePanelDeps = {
  * stream plays in its own tab and the player shares that tab with the app; frames are read on
  * the device and nothing is sent anywhere.
  */
-export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChanged(): void } {
+export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChanged(): void; edited(layout: Layout): void } {
   const { root } = deps;
   root.hidden = true;
   root.setAttribute('aria-label', 'Theo dõi live stream');
@@ -89,11 +91,19 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
   let choice: Choice | null = null;
   let tracker: Tracker | null = null;
   let ref: ViewSignature | null = null;
+  /** The cloth as it was on the frame the player marked, with nobody over the table. */
+  let cloth: ClothModel | null = null;
   let paused = false;
+  /** The app's table as this panel last knew it. */
+  let board: Layout | null = null;
+  /** The player is putting balls right by hand: nothing is read meanwhile. */
+  let editing = false;
   let opened = false;
   let message = '';
   /** Goes up whenever what is being followed changes, so late results are thrown away. */
   let run = 0;
+  /** Goes up with every correction: a look asked for before it is out of date. */
+  let edits = 0;
   let paintTimer: ReturnType<typeof setInterval> | null = null;
 
   const fit = (w: number, h: number) => {
@@ -146,9 +156,40 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
         paused = !paused;
         render();
       }),
+      button('Sửa bi', 'ghost', editBalls),
       button('Chọn khung', 'ghost', pickTable),
       button('Ngắt', 'ghost', () => stop('')),
     );
+  }
+
+  function put(layout: Layout) {
+    board = layout;
+    deps.place(layout);
+  }
+
+  const same = (a: Vec2[], b: Vec2[]) => a.every((p, i) => Math.hypot(p.x - b[i].x, p.y - b[i].y) < 0.5);
+
+  /** The table as it is being read, on the current frame, to put right by hand. */
+  function editBalls() {
+    if (!choice || !tracker || !ready()) return;
+    const frame = grab();
+    const start = { corners: choice.corners.map((c) => ({ x: c.x * frame.width, y: c.y * frame.height })), horizontal: choice.horizontal };
+    const mine = run;
+    editing = true;
+    deps.openFrame(frame, {
+      start,
+      markers: tracker.balls().map((b) => ({ pos: b.pos, id: b.id })),
+      doneLabel: 'Lưu sửa',
+      cancel: () => (editing = false),
+      done: (c) => {
+        editing = false;
+        if (mine !== run || !tracker) return;
+        if (!same(c.corners, start.corners) || c.horizontal !== start.horizontal) return follow(c, frame);
+        edits++;
+        put(tracker.correct(c.markers));
+        refresh();
+      },
+    });
   }
 
   async function connect() {
@@ -199,6 +240,7 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
     choice = null;
     tracker = null;
     ref = null;
+    cloth = null;
     paused = false;
     message = why;
     render();
@@ -226,12 +268,13 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
     choice = { corners: c.corners.map((p) => ({ x: p.x / frame.width, y: p.y / frame.height })), horizontal: c.horizontal, aspect: frame.width / frame.height };
     tracker = createTracker(deps.mode());
     ref = null;
+    cloth = null;
     paused = false;
     message = '';
     // What the player has just checked is the starting position.
     const data = frame.getContext('2d', { willReadFrequently: true })!.getImageData(0, 0, frame.width, frame.height);
     const first = tracker.seed(c.markers);
-    if (first.balls.length > 0) deps.place(first);
+    if (first.balls.length > 0) put(first);
     render();
     void loop(run, { width: data.width, height: data.height, data: data.data });
   }
@@ -240,7 +283,7 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
   async function loop(mine: number, first: { width: number; height: number; data: Uint8ClampedArray }) {
     let still: typeof first | null = first;
     while (mine === run && choice && tracker) {
-      if (!still && (paused || !ready())) {
+      if (!still && (paused || editing || !ready())) {
         await wait(PAUSE_MS);
         continue;
       }
@@ -264,13 +307,17 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
       }
       const { width, height } = img;
       const t = tracker;
+      const asked = edits;
       try {
-        const r = await client.look({ width, height, data: img.data, corners: choice.corners.map((c) => ({ x: c.x * width, y: c.y * height })), horizontal: choice.horizontal, mode: deps.mode(), check: t.watched(), ref });
+        const r = await client.look({ width, height, data: img.data, corners: choice.corners.map((c) => ({ x: c.x * width, y: c.y * height })), horizontal: choice.horizontal, mode: deps.mode(), check: t.watched(), ref, cloth });
         if (mine !== run) return;
-        if (still) ref = r.signature;
-        else if (!paused) {
-          const layout = t.look({ balls: r.balls, clear: r.clear, sameView: r.sameView });
-          if (layout) deps.place(layout);
+        if (still) {
+          ref = r.signature;
+          cloth = r.cloth;
+          t.meet(r.balls);
+        } else if (!paused && !editing && asked === edits) {
+          const layout = t.look({ balls: r.balls, clear: r.clear, sameView: r.sameView, cover: r.cover });
+          if (layout) put(layout);
         }
       } catch {
         if (mine !== run) return;
@@ -354,6 +401,9 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
     ctx.globalAlpha = 1;
   }
 
+  canvas.addEventListener('click', () => {
+    if (choice && tracker) editBalls();
+  });
   form.addEventListener('submit', (e) => {
     e.preventDefault();
     const link = parseLiveLink(input.value);
@@ -384,6 +434,33 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
   render();
 
   return {
+    /** Something on the app's own table was moved, added or taken off by hand. */
+    edited(layout) {
+      if (!tracker || paused || editing) return;
+      const before = board;
+      if (!before || before.mode !== layout.mode) return;
+      const all = new Set([...before.balls.map((b) => b.id), ...layout.balls.map((b) => b.id)]);
+      let changed = 0;
+      for (const id of all) {
+        const a = before.balls.find((b) => b.id === id);
+        const b = layout.balls.find((x) => x.id === id);
+        if (!a || !b || Math.hypot(a.pos.x - b.pos.x, a.pos.y - b.pos.y) > 0.002) changed++;
+      }
+      if (changed === 0) return;
+      if (changed > 3) {
+        // Shuffled, cleared or replaced: the table no longer stands for the stream.
+        paused = true;
+        message = '';
+        render();
+        return;
+      }
+      edits++;
+      board = layout;
+      // Balls that have no number yet are not on the app's table; they stay.
+      const unnamed = tracker.balls().filter((b) => b.id === null).map((b) => ({ pos: b.pos, id: null }));
+      tracker.correct([...layout.balls.map((b) => ({ pos: b.pos, id: b.id })), ...unnamed]);
+      refresh();
+    },
     toggle: () => show(!!root.hidden),
     modeChanged() {
       if (!tracker) return;
@@ -391,6 +468,7 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
       choice = null;
       tracker = null;
       ref = null;
+      cloth = null;
       message = 'Đã đổi chế độ chơi. Bấm "Chọn khung bàn" để theo dõi lại.';
       render();
       message = '';
