@@ -5,6 +5,7 @@ import type { ViewSignature } from '../live/view';
 import type { ClothModel } from '../vision/balls';
 import { applyH } from '../vision/homography';
 import { tableToImage } from '../vision/table';
+import type { LiveReply } from '../worker/live.worker';
 import { createLiveClient } from '../worker/liveClient';
 import type { FrameChoice, FrameRequest } from './photo';
 import type { StorageLike } from './state';
@@ -13,6 +14,8 @@ import { ballColor } from './tableView';
 const LINK_KEY = 'billiard-coach:live:v1';
 /** Longest side of the frames that are read. */
 const MAX_SIDE = 1600;
+/** Share of the bed covered from which a frame does not show the bare table. */
+const CROWDED = 0.05;
 /** Pause between two looks, ms. */
 const PAUSE_MS = 500;
 
@@ -104,6 +107,8 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
   let run = 0;
   /** Goes up with every correction: a look asked for before it is out of date. */
   let edits = 0;
+  /** The reference frame was painted for other balls than the player has since said there are. */
+  let stale = false;
   let paintTimer: ReturnType<typeof setInterval> | null = null;
 
   const fit = (w: number, h: number) => {
@@ -157,6 +162,7 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
         render();
       }),
       button('Sửa bi', 'ghost', editBalls),
+      button('Đọc lại bi', 'ghost', () => void reread()),
       button('Chọn khung', 'ghost', pickTable),
       button('Ngắt', 'ghost', () => stop('')),
     );
@@ -186,7 +192,54 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
         if (mine !== run || !tracker) return;
         if (!same(c.corners, start.corners) || c.horizontal !== start.horizontal) return follow(c, frame);
         edits++;
+        stale = true;
         put(tracker.correct(c.markers));
+        refresh();
+      },
+    });
+  }
+
+  /** Wipe the table and read the balls again from the picture as it is now, for the player to check. */
+  async function reread() {
+    if (!choice || !tracker || !ready() || editing) return;
+    const frame = grab();
+    const { width, height } = frame;
+    const start = { corners: choice.corners.map((c) => ({ x: c.x * width, y: c.y * height })), horizontal: choice.horizontal };
+    const mine = run;
+    const t = tracker;
+    editing = true;
+    text.textContent = 'Đang đọc lại bi…';
+    const img = frame.getContext('2d', { willReadFrequently: true })!.getImageData(0, 0, width, height);
+    let r: LiveReply | null = null;
+    try {
+      r = await client.look({ width, height, data: img.data, corners: start.corners, horizontal: start.horizontal, mode: deps.mode(), check: [], ref, cloth, sure: [], renew: false });
+    } catch {
+      // told below
+    }
+    if (mine !== run) return void (editing = false);
+    if (!r || !r.sameView) {
+      editing = false;
+      text.textContent = r ? 'Luồng đang chiếu góc máy khác. Chờ quay lại khung bàn rồi bấm lại.' : 'Không đọc được khung hình này. Hãy bấm lại.';
+      return;
+    }
+    const crowded = r.cover > 0.012;
+    deps.openFrame(frame, {
+      start,
+      markers: t.recognise(r.balls),
+      doneLabel: 'Dùng thế bi này',
+      cancel: () => {
+        editing = false;
+        refresh();
+      },
+      done: (c) => {
+        editing = false;
+        if (mine !== run || tracker !== t) return;
+        if (!same(c.corners, start.corners) || c.horizontal !== start.horizontal) return follow(c, frame);
+        edits++;
+        // With nobody over the table this frame is also the better one to compare with from now on.
+        if (!crowded) return follow(c, frame, t);
+        stale = true;
+        put(t.restart(c.markers));
         refresh();
       },
     });
@@ -233,6 +286,7 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
     run++;
     const s = stream;
     stream = null;
+    editing = false;
     s?.getTracks().forEach((t) => t.stop());
     video.srcObject = null;
     if (paintTimer !== null) clearInterval(paintTimer);
@@ -241,6 +295,7 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
     tracker = null;
     ref = null;
     cloth = null;
+    stale = false;
     paused = false;
     message = why;
     render();
@@ -262,19 +317,21 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
     });
   }
 
-  function follow(c: FrameChoice, frame: HTMLCanvasElement) {
+  /** Start following from a frame the player has checked; `known` keeps what its balls look like. */
+  function follow(c: FrameChoice, frame: HTMLCanvasElement, known: Tracker | null = null) {
     if (!stream) return;
     run++;
     choice = { corners: c.corners.map((p) => ({ x: p.x / frame.width, y: p.y / frame.height })), horizontal: c.horizontal, aspect: frame.width / frame.height };
-    tracker = createTracker(deps.mode());
+    tracker = known ?? createTracker(deps.mode());
     ref = null;
     cloth = null;
+    stale = false;
     paused = false;
     message = '';
     // What the player has just checked is the starting position.
     const data = frame.getContext('2d', { willReadFrequently: true })!.getImageData(0, 0, frame.width, frame.height);
-    const first = tracker.seed(c.markers);
-    if (first.balls.length > 0) put(first);
+    const first = known ? known.restart(c.markers) : tracker.seed(c.markers);
+    if (known || first.balls.length > 0) put(first);
     render();
     void loop(run, { width: data.width, height: data.height, data: data.data });
   }
@@ -309,11 +366,16 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
       const t = tracker;
       const asked = edits;
       try {
-        const r = await client.look({ width, height, data: img.data, corners: choice.corners.map((c) => ({ x: c.x * width, y: c.y * height })), horizontal: choice.horizontal, mode: deps.mode(), check: t.watched(), ref, cloth });
+        const r = await client.look({ width, height, data: img.data, corners: choice.corners.map((c) => ({ x: c.x * width, y: c.y * height })), horizontal: choice.horizontal, mode: deps.mode(), check: t.watched(), ref, cloth, sure: t.places(), renew: stale && t.status() === 'steady' });
         if (mine !== run) return;
+        // A frame with somebody over the table is no measure of what is always there: wait for a clear one.
+        // After a correction the old one is wrong about which things are balls.
+        if (r.cloth && r.sameView && asked === edits && r.cover < CROWDED) {
+          cloth = r.cloth;
+          stale = false;
+        }
         if (still) {
           ref = r.signature;
-          cloth = r.cloth;
           t.meet(r.balls);
         } else if (!paused && !editing && asked === edits) {
           const layout = t.look({ balls: r.balls, clear: r.clear, sameView: r.sameView, cover: r.cover });
@@ -334,7 +396,8 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
     if (!choice || !tracker || message) return render();
     const unknown = tracker.balls().filter((b) => b.id === null).length;
     const s = tracker.status();
-    const next = paused ? 'Đã tạm dừng.' : STATUS_TEXT[s] + (unknown && s === 'steady' ? ` ${unknown} bi chưa rõ số.` : '');
+    const bare = cloth || paused ? '' : ' Đang có người che lúc chọn khung; app sẽ lấy lại nền khi bàn trống.';
+    const next = paused ? 'Đã tạm dừng.' : STATUS_TEXT[s] + (unknown && s === 'steady' ? ` ${unknown} bi chưa rõ số.` : '') + bare;
     if (text.textContent !== next) text.textContent = next;
   }
 
@@ -455,6 +518,7 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
         return;
       }
       edits++;
+      stale = true;
       board = layout;
       // Balls that have no number yet are not on the app's table; they stay.
       const unnamed = tracker.balls().filter((b) => b.id === null).map((b) => ({ pos: b.pos, id: null }));
@@ -469,6 +533,7 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
       tracker = null;
       ref = null;
       cloth = null;
+    stale = false;
       message = 'Đã đổi chế độ chơi. Bấm "Chọn khung bàn" để theo dõi lại.';
       render();
       message = '';

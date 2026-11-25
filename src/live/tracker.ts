@@ -157,6 +157,7 @@ export function createTracker(mode: GameMode) {
 
   const observe = (t: Track, b: FoundBall) => {
     t.hidden = false;
+    t.pinned = false;
     t.age++;
     // Close to a player the outline is not to be trusted to the millimetre.
     const w = b.attached ? 0.05 : 0.3;
@@ -216,6 +217,8 @@ export function createTracker(mode: GameMode) {
     const pairs = pairUp(tracks.map((t) => t.pos), balls.map((b) => b.pos), SAME).filter(([i, j]) => !impostor(tracks[i], balls[j]));
     const seen = new Map(pairs);
     const taken = new Set(pairs.map(([, j]) => j));
+    // A ball has left: there was a shot, and what was put on by hand must now be seen like the rest.
+    if (tracks.some((t, i) => !t.pinned && t.age >= AGE && !seen.has(i) && clear[i])) for (const t of tracks) t.pinned = false;
     const keep: Track[] = [];
     tracks.forEach((t, i) => {
       const j = seen.get(i);
@@ -252,14 +255,41 @@ export function createTracker(mode: GameMode) {
   return {
     /** Places the next look should report `clear` for. */
     watched: (): Vec2[] => [...tracks.map((t) => t.pos), ...ignored],
+    /** Where balls are, as far as is known. */
+    places: (): Vec2[] => tracks.map((t) => t.pos),
     /** Balls checked by the player on a clear frame. */
     seed(balls: { pos: Vec2; id: number | null }[]): Layout {
-      tracks = balls.map((b) => ({ ...track(b.pos, b.id), told: b.id !== null, age: AGE }));
+      tracks = balls.map((b) => ({ ...track(b.pos, b.id), told: b.id !== null, pinned: true, age: AGE }));
       profiles.clear();
       lost.clear();
       ignored = [];
       last = null;
       calm = 0;
+      status = 'settling';
+      published = layoutNow();
+      return published;
+    },
+    /** Balls on a frame, named by the faces known so far where there are any. Parts of players are left out. */
+    recognise(balls: FoundBall[]): { pos: Vec2; id: number | null }[] {
+      const real = balls.filter((b) => !b.attached);
+      const cost = real.map((b) =>
+        ids.map((id) => {
+          const p = profiles.get(id);
+          const vote = b.id === id ? 0.2 + b.confidence : 0;
+          return p && b.look ? Math.max(0, lookGap(p.look, b.look) - 0.5 * vote) : Math.max(0, 2.6 - 2 * vote);
+        }),
+      );
+      const got = assign(cost, ids.length, ALIKE);
+      return real.map((b, i) => ({ pos: b.pos, id: got[i] === null ? null : ids[got[i]!] }));
+    },
+    /** Forget the table and go on from this one. What each ball looks like is kept. */
+    restart(balls: { pos: Vec2; id: number | null }[]): Layout {
+      tracks = balls.map((b) => ({ ...track(b.pos, b.id), told: b.id !== null, pinned: true, age: AGE }));
+      lost.clear();
+      ignored = [];
+      last = null;
+      calm = 0;
+      young = 0;
       status = 'settling';
       published = layoutNow();
       return published;

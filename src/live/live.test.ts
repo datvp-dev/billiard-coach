@@ -270,3 +270,118 @@ test('in contrasty video, where shadows turn almost black, a shadow is not a sec
   expect(r.balls).toHaveLength(few.length);
   for (const f of few) expect(r.balls.some((b) => Math.hypot(b.pos.x - f.pos.x, b.pos.y - f.pos.y) < 0.03), `ball ${f.id}`).toBe(true);
 });
+
+// --- things that are always there must not stand in for a ball that has gone ---
+/** A camera low behind one end, as broadcasts have it: the far cushion's shaded face is in view. */
+const END_CAM = { ...CAM, from: [5.4, 0.66, 1.75] as [number, number, number], at: [1.15, 0.635, 0] as [number, number, number], fov: 0.5, cloth: [0.02, 0.33, 0.04] as [number, number, number], tv: true };
+const shot = (balls: FakeBall[]) => {
+  const { img, corners } = photograph(END_CAM, balls, false);
+  for (let i = 0; i < img.data.length; i += 4) for (let k = 0; k < 3; k++) img.data[i + k] = (img.data[i + k] - 30) * 1.2;
+  return { img, corners };
+};
+/** Dark green leather and netting in a far corner pocket's mouth. */
+const withNet = (s: ReturnType<typeof shot>) => {
+  const c = s.corners[0];
+  for (let y = Math.round(c.y) - 4; y < c.y + 12; y++) {
+    for (let x = Math.round(c.x) - 3; x < c.x + 13; x++) {
+      if ((x - c.x - 5) ** 2 + (y - c.y - 4) ** 2 > 60) continue;
+      const lit = y < c.y + 1 ? 1.5 : 0.7;
+      s.img.data.set([8 * lit, 84 * lit, 52 * lit, 255], (y * s.img.width + x) * 4);
+    }
+  }
+  return s;
+};
+const follow = (first: FakeBall[], then: FakeBall[], net = false) => {
+  const a = net ? withNet(shot(first)) : shot(first);
+  const b = net ? withNet(shot(then)) : shot(then);
+  const t = createTracker('9');
+  t.seed(first.map((f) => ({ pos: f.pos, id: f.id })));
+  const ref = watchTable(a.img, a.corners, false, '9', first.map((f) => f.pos));
+  t.meet(ref.balls);
+  let done = null;
+  for (let k = 0; k < 14; k++) {
+    const s = k < 3 ? a : b;
+    const r = watchTable(s.img, a.corners, false, '9', t.watched(), ref.cloth);
+    done = t.look({ balls: r.balls, clear: r.clear, sameView: true, cover: r.cover }) ?? done;
+  }
+  return done;
+};
+const FIRST: FakeBall[] = [{ id: 0, pos: P(0.4, 0.9) }, { id: 6, pos: P(0.5, 0.3) }, { id: 7, pos: P(0.035, 0.67) }, { id: 9, pos: P(0.6, 0.62) }];
+
+test('a ball potted from against the far cushion does not leave a ghost on it', () => {
+  const l = follow(FIRST, [{ id: 0, pos: P(0.3, 1.0) }, FIRST[1], FIRST[3]])!;
+  expect(l.balls.map((b) => b.id)).toEqual([0, 6, 9]);
+});
+test('a potted green ball is not found again in the green of a pocket', () => {
+  const l = follow(FIRST, [{ id: 0, pos: P(0.3, 1.0) }, FIRST[2], FIRST[3]], true)!;
+  expect(l.balls.map((b) => b.id)).toEqual([0, 7, 9]);
+});
+
+test('starting over reads the table afresh but still knows the balls by their faces', () => {
+  const t = started();
+  // A new position; the colour rules have the 3 and the 5 the wrong way round.
+  const now = [S(0, 1.0, 0.9, 0), S(5, 1.2, 0.2, 3), S(3, 2.2, 1.0, 5), S(8, 0.3, 0.3, 8, { attached: true })];
+  const read = t.recognise(now);
+  expect(read.map((m) => [m.id, m.pos.x])).toEqual([[0, 1.0], [3, 1.2], [5, 2.2]]);
+  const l = t.restart(read);
+  expect(l.balls.map((b) => b.id)).toEqual([0, 3, 5]);
+  expect(t.balls()).toHaveLength(3);
+  expect(run(t, now.slice(0, 3), 12)).toBeNull();
+  // Nothing from before comes back, and the faces are still known after the next shot.
+  const after = run(t, [S(0, 0.5, 0.5, 0), S(5, 1.6, 0.9, 3), S(3, 0.9, 0.2, 5)], 8, now.map((b) => b.pos))!;
+  expect(after.balls.find((b) => b.id === 3)!.pos.x).toBeCloseTo(1.6, 2);
+  expect(after.balls.find((b) => b.id === 5)!.pos.x).toBeCloseTo(0.9, 2);
+});
+test('starting over forgets what was marked as not being a ball', () => {
+  const t = started();
+  t.correct(TABLE_A.slice(0, 3).map((b) => ({ pos: b.pos, id: b.id })));
+  t.restart(TABLE_A.map((b) => ({ pos: b.pos, id: b.id })));
+  expect(run(t, TABLE_A, 12)).toBeNull();
+  expect(t.balls().map((b) => b.id)).toEqual([0, 1, 3, 5]);
+});
+
+import { createLiveClient } from '../worker/liveClient';
+test('looks asked for at the same time are answered one after another, each with its own result', async () => {
+  const sent: { seq: number; width: number }[] = [];
+  const fake = {
+    onmessage: null as ((e: { data: unknown }) => void) | null,
+    postMessage(m: { seq: number; width: number }) {
+      sent.push(m);
+      setTimeout(() => fake.onmessage?.({ data: { seq: m.seq, cover: m.width } }), 5);
+    },
+    terminate() {},
+  };
+  const c = createLiveClient(() => fake as unknown as Worker);
+  const ask = (width: number) => c.look({ width, height: 1, data: new Uint8ClampedArray(4), corners: [], horizontal: true, mode: '9', check: [], ref: null, cloth: null, sure: [], renew: false });
+  const both = Promise.all([ask(1), ask(2)]);
+  const got = await both;
+  expect(got.map((r) => r.cover)).toEqual([1, 2]);
+});
+test('balls picked by hand when starting over stay although they cannot be made out, and real ones still count as moved', () => {
+  const t = started();
+  t.restart([{ pos: P(1.27, 0.45), id: 0 }, ...TABLE_A.slice(1).map((b) => ({ pos: b.pos, id: b.id }))]);
+  expect(run(t, TABLE_A.slice(1), 15, [P(1.27, 0.45)])).toBeNull();
+  // The 1 is potted: the others are seen to be where they were, the picked one is not seen at all.
+  const l = run(t, TABLE_A.slice(2), 12, [P(1.27, 0.45), P(1.7, 0.8)])!;
+  expect(l.balls.map((b) => b.id)).toEqual([3, 5]);
+});
+test('a ball overlooked at first and added by hand later is followed like the others', () => {
+  const first = FIRST.slice(0, 3);
+  const a = shot(FIRST);
+  const b = shot([FIRST[0], FIRST[1], FIRST[2], { id: 9, pos: P(0.9, 0.9) }]);
+  const t = createTracker('9');
+  t.seed(first.map((f) => ({ pos: f.pos, id: f.id })));
+  const ref = watchTable(a.img, a.corners, false, '9', t.watched(), null, t.places());
+  t.meet(ref.balls);
+  t.correct(FIRST.map((f) => ({ pos: f.pos, id: f.id })));
+  // The reference is made anew from the next frame, with the added ball known to be one.
+  const anew = watchTable(a.img, a.corners, false, '9', t.watched(), null, t.places());
+  let done = null;
+  for (let k = 0; k < 16; k++) {
+    const s = k < 5 ? a : b;
+    const r = watchTable(s.img, a.corners, false, '9', t.watched(), anew.cloth);
+    done = t.look({ balls: r.balls, clear: r.clear, sameView: true, cover: r.cover }) ?? done;
+    if (k === 4) expect(t.balls().every((x) => !x.hidden)).toBe(true);
+  }
+  expect(done!.balls.find((x) => x.id === 9)!.pos.x).toBeCloseTo(0.9, 1);
+});

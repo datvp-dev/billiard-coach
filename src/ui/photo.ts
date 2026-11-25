@@ -176,6 +176,16 @@ export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; p
         renderChrome();
         draw();
       }),
+      ...(frameReq
+        ? [
+            button('Xóa hết', 'ghost', () => {
+              markers = [];
+              selected = -1;
+              renderChrome();
+              draw();
+            }),
+          ]
+        : []),
       button('Hủy', 'ghost', close),
       button(frameReq ? frameReq.doneLabel : `Đặt ${named} bi lên bàn`, 'primary', () => {
         if (frameReq) {

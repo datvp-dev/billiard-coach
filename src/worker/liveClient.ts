@@ -7,9 +7,9 @@ export function createLiveClient(makeWorker: () => Worker = () => new Worker(new
   let worker: Worker | null = null;
   let seq = 0;
   let waiting: { seq: number; done(r: LiveReply): void; fail(e: Error): void } | null = null;
-  return {
-    look(r) {
-      return new Promise((done, fail) => {
+  let tail: Promise<unknown> = Promise.resolve();
+  const send = (r: Omit<LiveRequest, 'seq'>) =>
+      new Promise<LiveReply>((done, fail) => {
         if (!worker) {
           worker = makeWorker();
           worker.onmessage = (e: MessageEvent<LiveReply>) => {
@@ -30,6 +30,11 @@ export function createLiveClient(makeWorker: () => Worker = () => new Worker(new
         waiting = { seq, done, fail };
         worker.postMessage({ ...r, seq }, [r.data.buffer]);
       });
+  return {
+    look(r) {
+      const answer = tail.then(() => send(r));
+      tail = answer.catch(() => {});
+      return answer;
     },
     dispose() {
       worker?.terminate();

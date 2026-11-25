@@ -29,7 +29,7 @@ export type FoundBall = {
   attached?: boolean;
 };
 /** The cloth as seen when nobody is in the way, to compare later frames of the same view with. */
-export type ClothModel = { width: number; height: number; tile: number; tiles: Float32Array; whole: [number, number, number]; /** Large things that are always there: a rail's shadow, a caption over the picture. */ fixed: Uint8Array };
+export type ClothModel = { width: number; height: number; tile: number; tiles: Float32Array; whole: [number, number, number]; /** That frame itself, smoothed, with its balls painted out: rails' shadows, pockets, lettering. */ scene: Uint8ClampedArray };
 export type Spot = { pos: Vec2; x: number; y: number; r: number; score: number; attached?: boolean };
 
 const median = (a: number[]) => (a.length ? a.sort((p, q) => p - q)[a.length >> 1] : 0);
@@ -212,8 +212,35 @@ export function surveyBed(img: Raster, corners: Vec2[], horizontal: boolean, kno
     ev[p] = d > 1 ? 1 : l < 0 ? 0.45 * Math.min(1, Math.max(0, (-l - 0.12) / 0.3)) : 0;
   }
 
-  // What was there on the clear frame and is no ball (lettering, a rail's shadow) says nothing.
-  if (given) for (let p = 0; p < bw * bh; p++) if (given.fixed[p]) inside[p] = 0;
+  // What looks the same as on the clear frame is no ball, whatever it is. Plain cloth never is
+  // either, so a ball that was overlooked on that frame leaves nothing behind when it goes.
+  if (given) {
+    const scene = given.scene;
+    const differs = (o: number, q: number) => {
+      const b = [scene[q] * gain, scene[q + 1] * gain, scene[q + 2] * gain];
+      if (Math.max(Math.abs(avg[o] - b[0]), Math.abs(avg[o + 1] - b[1]), Math.abs(avg[o + 2] - b[2])) < 20) return false;
+      const s1 = avg[o] + avg[o + 1] + avg[o + 2] + 1e-3;
+      const s2 = b[0] + b[1] + b[2] + 1e-3;
+      // Dark pixels have hardly any colour to compare.
+      const dim = 1 + 40 / Math.min(s1, s2);
+      const l = Math.log((s1 + 6) / (s2 + 6));
+      return Math.hypot(Math.hypot(avg[o] / s1 - b[0] / s2, avg[o + 1] / s1 - b[1] / s2) / (1.3 * tc * dim), l / (l > 0 ? 1.5 * tl : 0.5)) > 1;
+    };
+    for (let y = 0; y < bh; y++) {
+      for (let x = 0; x < bw; x++) {
+        const p = y * bw + x;
+        if (ev[p] === 0) continue;
+        const o = p * 3;
+        // Where the clear frame shows plain cloth, the cloth has already been compared with.
+        const ti = (Math.min(th - 1, Math.floor(y / tile)) * tw + Math.min(tw - 1, Math.floor(x / tile))) * 3;
+        const ss = scene[o] + scene[o + 1] + scene[o + 2] + 1e-3;
+        const sl = Math.log((ss + 6) / (cloth[ti + 2] + 6));
+        if (sl > -0.14 && sl < 1.2 * tl && Math.hypot(scene[o] / ss - cloth[ti], scene[o + 1] / ss - cloth[ti + 1]) < 0.8 * tc) continue;
+        // Edges may sit a pixel away from where they were.
+        if (!differs(o, o) || (x > 0 && !differs(o, o - 3)) || (x < bw - 1 && !differs(o, o + 3)) || (y > 0 && !differs(o, o - bw * 3)) || (y < bh - 1 && !differs(o, o + bw * 3))) ev[p] = 0;
+      }
+    }
+  }
 
   // Row sums make the share of evidence inside a disc cheap to look up.
   const rowE = new Float32Array((bw + 1) * bh);
@@ -270,7 +297,7 @@ export function surveyBed(img: Raster, corners: Vec2[], horizontal: boolean, kno
   const areaRim: number[] = [0];
   const stack = new Int32Array(bw * bh);
   for (let s = 0; s < bw * bh; s++) {
-    if (areaId[s] || !inside[s] || ev[s] !== 1 || given?.fixed[s]) continue;
+    if (areaId[s] || !inside[s] || ev[s] !== 1) continue;
     const id = areaSize.length;
     let n = 0;
     let rim = 0;
@@ -282,7 +309,7 @@ export function surveyBed(img: Raster, corners: Vec2[], horizontal: boolean, kno
       n++;
       const x = p % bw;
       const next = (q: number) => {
-        if (!areaId[q] && inside[q] && ev[q] === 1 && !given?.fixed[q]) (areaId[q] = id), (stack[t++] = q);
+        if (!areaId[q] && inside[q] && ev[q] === 1) (areaId[q] = id), (stack[t++] = q);
       };
       if (x > 0) next(p - 1);
       if (x < bw - 1) next(p + 1);
@@ -296,26 +323,12 @@ export function surveyBed(img: Raster, corners: Vec2[], horizontal: boolean, kno
   // Big, or reaching in over a rail and bigger than a few balls: somebody, or something they hold.
   const oneBall = Math.PI * mid * mid;
   const isPerson = (id: number) => id > 0 && (areaSize[id] > LARGE * oneBall || (areaSize[id] > 3.5 * oneBall && areaRim[id] > 0.7 * mid));
-  const fixed = given ? given.fixed : new Uint8Array(bw * bh);
   let hidden = 0;
   let bed = 0;
   for (let p = 0; p < bw * bh; p++) {
     if (!inside[p]) continue;
     bed++;
-    if (!isPerson(areaId[p])) continue;
-    hidden++;
-    if (!given) fixed[p] = 1;
-  }
-  if (!given) {
-    for (const c of sure) {
-      const q = view.toImage(c);
-      const r = view.radius(c) * 1.3;
-      for (let y = Math.max(0, Math.floor(q.y - y0 - r)); y <= Math.min(bh - 1, q.y - y0 + r); y++) {
-        for (let x = Math.max(0, Math.floor(q.x - x0 - r)); x <= Math.min(bw - 1, q.x - x0 + r); x++) {
-          if ((x + x0 - q.x) ** 2 + (y + y0 - q.y) ** 2 <= r * r) fixed[y * bw + x] = 0;
-        }
-      }
-    }
+    if (isPerson(areaId[p])) hidden++;
   }
   const rate = (cx: number, cy: number): { score: number; pos: Vec2; r: number; fill: number } | null => {
     const pos = view.toTable(cx + x0, cy + y0);
@@ -425,7 +438,7 @@ export function surveyBed(img: Raster, corners: Vec2[], horizontal: boolean, kno
   return {
     spots,
     toTable: nothing.toTable,
-    cloth: { width: bw, height: bh, tile, tiles: cloth, whole, fixed },
+    cloth: { width: bw, height: bh, tile, tiles: cloth, whole, scene: given ? given.scene : emptyScene(avg, bw, bh, x0, y0, view, sure) },
     cover: bed ? hidden / bed : 0,
     clearAt(pos) {
       const p = view.toImage(pos);
@@ -433,6 +446,41 @@ export function surveyBed(img: Raster, corners: Vec2[], horizontal: boolean, kno
       return n > 0 && e / n < 0.22;
     },
   };
+}
+
+/**
+ * The smoothed frame with the balls at `sure` painted out. What lies behind a ball continues from
+ * either side of it along the nearest rail, so that the face of a cushion stays a cushion.
+ */
+function emptyScene(avg: Float32Array, bw: number, bh: number, x0: number, y0: number, view: ReturnType<typeof ballView>, sure: Vec2[]): Uint8ClampedArray {
+  const out = new Uint8ClampedArray(avg);
+  const holes = sure.map((c) => ({ c, q: view.toImage(c), r: view.radius(c) * 1.4 }));
+  const inHole = (x: number, y: number) => holes.some((h) => (x - h.q.x) ** 2 + (y - h.q.y) ** 2 <= h.r * h.r);
+  for (const h of holes) {
+    const { c, q, r } = h;
+    const alongX = Math.min(c.y, W - c.y) <= Math.min(c.x, L - c.x);
+    for (let y = Math.max(0, Math.floor(q.y - y0 - r)); y <= Math.min(bh - 1, q.y - y0 + r); y++) {
+      for (let x = Math.max(0, Math.floor(q.x - x0 - r)); x <= Math.min(bw - 1, q.x - x0 + r); x++) {
+        if ((x + x0 - q.x) ** 2 + (y + y0 - q.y) ** 2 > r * r) continue;
+        const t = view.toTable(x + x0, y + y0);
+        const ends = [-1, 1].map((dir) => {
+          for (let d = 0.4 * R; d < 12 * R; d += 0.3 * R) {
+            const z = view.toImage(alongX ? { x: t.x + dir * d, y: t.y } : { x: t.x, y: t.y + dir * d });
+            const px = Math.round(z.x - x0);
+            const py = Math.round(z.y - y0);
+            if (px < 0 || py < 0 || px >= bw || py >= bh) return null;
+            if (!inHole(z.x, z.y)) return { d, o: (py * bw + px) * 3 };
+          }
+          return null;
+        });
+        const [a, b] = ends;
+        if (!a && !b) continue;
+        const wa = a && b ? b.d / (a.d + b.d) : a ? 1 : 0;
+        for (let k = 0; k < 3; k++) out[(y * bw + x) * 3 + k] = (a ? avg[a.o + k] * wa : 0) + (b ? avg[b.o + k] * (1 - wa) : 0);
+      }
+    }
+  }
+  return out;
 }
 
 /** Mean colour around every pixel of a window of the picture. */

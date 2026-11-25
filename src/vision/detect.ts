@@ -21,9 +21,10 @@ export type Watch = { balls: FoundBall[]; clear: boolean[]; cover: number; cloth
 
 /**
  * Like `detectBalls` for a running video: compares with the cloth of an earlier clear frame when
- * there is one, and reports for each of `check` whether that spot on the bed is empty.
+ * there is one, and reports for each of `check` whether that spot on the bed is empty. `sure` are the
+ * balls known to be there, for making a new reference from this frame.
  */
-export function watchTable(img: Raster, corners: Vec2[], horizontal: boolean, mode: GameMode, check: Vec2[], known: ClothModel | null = null): Watch {
-  const survey = surveyBed(img, corners, horizontal, known, known ? [] : check);
+export function watchTable(img: Raster, corners: Vec2[], horizontal: boolean, mode: GameMode, check: Vec2[], known: ClothModel | null = null, sure: Vec2[] = check): Watch {
+  const survey = surveyBed(img, corners, horizontal, known, sure);
   return { balls: nameSpots(img, corners, horizontal, mode, survey.spots), clear: check.map((p) => survey.clearAt(p)), cover: survey.cover, cloth: survey.cloth, at: survey.toTable };
 }
