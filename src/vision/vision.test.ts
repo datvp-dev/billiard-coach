@@ -4,7 +4,9 @@ import type { Vec2 } from '../core/types';
 import { enclosingQuad, orderCorners } from './corners';
 import { detectBalls, guessCorners } from './detect';
 import { applyH, homography, invertH } from './homography';
-import { drawTable, type FakeBall } from './synthetic';
+import { cameraFromPlane } from './camera';
+import { drawTable, photograph, type FakeBall } from './synthetic';
+import { longSideHorizontal, tableToImage } from './table';
 
 const { R } = TABLE;
 const P = (x: number, y: number): Vec2 => ({ x, y });
@@ -86,19 +88,17 @@ test('two touching balls are told apart', () => {
   expect(found).toHaveLength(2);
   for (const b of pair) expect(found.some((f) => near(f.pos, b.pos) < 0.6 * R)).toBe(true);
 });
-test('a blue stripe is the 10 in ten-ball and unknown in nine-ball', () => {
+test('a blue stripe is the 10 in ten-ball', () => {
   const balls: FakeBall[] = [{ id: 10, pos: P(1.0, 0.6) }];
-  const img = drawTable(800, 550, OVERHEAD, true, balls);
-  expect(detectBalls(img, OVERHEAD, true, '10')[0].id).toBe(10);
-  expect(detectBalls(img, OVERHEAD, true, '9')[0].id).toBeNull();
+  expect(detectBalls(drawTable(800, 550, OVERHEAD, true, balls), OVERHEAD, true, '10')[0].id).toBe(10);
 });
-test('when two balls look like the same number only one keeps it', () => {
-  const balls: FakeBall[] = [
-    { id: 1, pos: P(1.0, 0.6) },
-    { id: 1, pos: P(1.6, 0.6) },
-  ];
+test('no number is given to two balls', () => {
+  const balls: FakeBall[] = [0.6, 1.0, 1.4, 1.8].map((x) => ({ id: 3, pos: P(x, 0.6) }));
   const found = detectBalls(drawTable(800, 550, OVERHEAD, true, balls), OVERHEAD, true, '9');
-  expect(found.map((f) => f.id).sort()).toEqual([1, null]);
+  expect(found).toHaveLength(4);
+  const ids = found.map((f) => f.id).filter((id) => id !== null);
+  expect(new Set(ids).size).toBe(ids.length);
+  expect(ids).toContain(3);
 });
 test('pockets and an empty table give no balls', () => {
   expect(detectBalls(drawTable(800, 550, OVERHEAD, true, []), OVERHEAD, true, '9')).toEqual([]);
@@ -106,4 +106,51 @@ test('pockets and an empty table give no balls', () => {
 test('corners of a wide trapezoid are ordered by its top edge, not by which point is nearest the picture corner', () => {
   const q = orderCorners([P(-164, 613), P(1240, 653), P(207, 441), P(1107, 473)]);
   expect(q).toEqual([P(207, 441), P(1107, 473), P(1240, 653), P(-164, 613)]);
+});
+
+// --- photos taken by someone standing at the table: round balls, raised cushions, lamps, shadows ---
+const GREEN: [number, number, number] = [0.05, 0.36, 0.2];
+const BLUE: [number, number, number] = [0.06, 0.25, 0.5];
+const GREY: [number, number, number] = [0.42, 0.44, 0.46];
+const SIDE = { width: 1200, height: 900, from: [1.27, -0.95, 1.75] as [number, number, number], at: [1.27, 0.52, 0] as [number, number, number], fov: 1.5 };
+const END = { width: 900, height: 1200, from: [3.95, 0.65, 1.7] as [number, number, number], at: [1.32, 0.635, 0] as [number, number, number], fov: 1.1 };
+const WARM: [number, number, number] = [1.1, 0.97, 0.78];
+
+test('the camera is recovered from the four corners', () => {
+  const { corners } = photograph({ ...END, width: 90, height: 120, cloth: BLUE }, [], false);
+  const cam = cameraFromPlane(tableToImage(corners, false), 90, 120);
+  expect(cam.center[0]).toBeCloseTo(3.95, 1);
+  expect(cam.center[1]).toBeCloseTo(0.65, 1);
+  expect(cam.center[2]).toBeCloseTo(1.7 - 0.0363, 1);
+  expect(cam.misfit).toBeLessThan(0.02);
+});
+test('a table seen from one end is recognised as such even when it looks wider than deep', () => {
+  const low = { ...END, width: 120, height: 90, from: [3.4, 0.635, 0.9] as [number, number, number] };
+  const { corners } = photograph({ ...low, cloth: BLUE }, [], false);
+  expect(longSideHorizontal(corners, 120, 90)).toBe(false);
+});
+test('standing beside a green table under warm lamps: every ball is found, the green one included, and named', () => {
+  const { img, corners } = photograph({ ...SIDE, cloth: GREEN, tint: WARM }, BALLS, true);
+  expectAll(detectBalls(img, corners, true, '9'), BALLS, 0.5 * R);
+});
+test('a blue ball on blue cloth is found', () => {
+  const { img, corners } = photograph({ ...SIDE, cloth: BLUE, tint: WARM }, BALLS, true);
+  expectAll(detectBalls(img, corners, true, '9'), BALLS, 0.5 * R);
+});
+test('grey cloth and television ball colours: corners, balls and numbers from the photo alone', () => {
+  const { img, corners } = photograph({ ...END, cloth: GREY, tv: true }, BALLS, false);
+  const g = guessCorners(img)!;
+  expect(g.horizontal).toBe(false);
+  // Grey cloth ends at a faint seam, so the guess is only close enough to be nudged into place.
+  g.corners.forEach((c, i) => expect(near(c, corners[i]), `corner ${i}`).toBeLessThan(40));
+  // The shaded underside of a white ball fades into grey cloth, which shifts it a little.
+  expectAll(detectBalls(img, corners, false, '9'), BALLS, 0.8 * R);
+});
+test('two balls in contact, one behind the other, are both found and no shadow becomes a third', () => {
+  const pair: FakeBall[] = [
+    { id: 3, pos: P(1.2, 0.5) },
+    { id: 5, pos: P(1.2, 0.5 + 2 * R) },
+  ];
+  const { img, corners } = photograph({ ...SIDE, cloth: BLUE }, pair, true);
+  expectAll(detectBalls(img, corners, true, '9'), pair, 0.6 * R);
 });

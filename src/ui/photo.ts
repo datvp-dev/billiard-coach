@@ -10,7 +10,7 @@ import { ballColor } from './tableView';
 
 const { L, W, R } = TABLE;
 /** Longest side the photo is reduced to before it is analysed. */
-const MAX_SIDE = 1280;
+const MAX_SIDE = 1600;
 const GRAB_PX = 34;
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls = '', text = ''): HTMLElementTagNameMap[K] {

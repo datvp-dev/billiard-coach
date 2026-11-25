@@ -1,255 +1,365 @@
-import { TABLE } from '../core/config';
+import { PHYS, TABLE } from '../core/config';
 import { POCKET_IDS, isSidePocket, pocketCenter } from '../core/table';
 import type { GameMode, Vec2 } from '../core/types';
-import { classifyBall } from './classify';
-import { applyH, invertH, type Homography } from './homography';
-import { looksLikeCloth, toneOf, type Raster, type Tone } from './raster';
+import { cameraFromPlane, type Camera } from './camera';
+import { lightGain, lookOf, nameBalls, type BallLook } from './classify';
+import { applyH, homography, invertH } from './homography';
+import type { Raster } from './raster';
+import { tableToImage } from './table';
 
 const { L, W, R } = TABLE;
+/** Ball centres lie this far above the plane of the cushion noses, where the corners are marked. */
+const BALL_Z = R - PHYS.cushionH;
+
+/** Discs below this are shadows, logos and scuffs; real balls score well above it. */
+const MIN_SCORE = 1.05;
+/** A full set plus six pocket mouths, which are sorted out later, and some room. */
+const MAX_SPOTS = 26;
 
 export type FoundBall = { pos: Vec2; id: number | null; confidence: number };
+export type Spot = { pos: Vec2; x: number; y: number; r: number; score: number };
 
-/** Median chromaticity and brightness of a flat picture of the bed: the cloth, since it covers most of it. */
-function medianCloth(img: Raster): Tone {
-  const cr: number[] = [];
-  const cg: number[] = [];
-  const lum: number[] = [];
-  const step = Math.max(1, Math.floor(Math.sqrt((img.width * img.height) / 6000)));
-  for (let y = 0; y < img.height; y += step) {
-    for (let x = 0; x < img.width; x += step) {
-      const i = (y * img.width + x) * 4;
-      if (img.data[i + 3] === 0) continue;
-      const t = toneOf(img.data[i], img.data[i + 1], img.data[i + 2]);
-      cr.push(t.cr);
-      cg.push(t.cg);
-      lum.push(t.lum);
-    }
-  }
-  const med = (a: number[]) => (a.length ? a.sort((p, q) => p - q)[a.length >> 1] : 0);
-  return { cr: med(cr), cg: med(cg), lum: med(lum) };
+const median = (a: number[]) => (a.length ? a.sort((p, q) => p - q)[a.length >> 1] : 0);
+
+/** Where a pixel belongs if it shows the middle of a ball, and how big that ball appears. */
+export function ballView(camera: Camera) {
+  const table = [
+    { x: 0, y: 0 },
+    { x: L, y: 0 },
+    { x: L, y: W },
+    { x: 0, y: W },
+  ];
+  const toImage = homography(table, table.map((p) => camera.project(p.x, p.y, BALL_Z)));
+  const toTable = invertH(toImage);
+  return {
+    toTable: (x: number, y: number) => applyH(toTable, { x, y }),
+    toImage: (p: Vec2) => camera.project(p.x, p.y, BALL_Z),
+    radius: (p: Vec2) => camera.scaleAt(p.x, p.y, BALL_Z) * R,
+  };
 }
 
-type Blob = { px: number[] };
+/**
+ * Balls in a photo of the table. Works on the photo itself: the camera position, recovered from
+ * the four corners, says exactly how large a ball must look at every spot, so the search is for
+ * discs of a known size that differ from the cloth around them.
+ */
+export function locateBalls(img: Raster, corners: Vec2[], horizontal: boolean): Spot[] {
+  const { width: w, height: h, data } = img;
+  const camera = cameraFromPlane(tableToImage(corners, horizontal), w, h);
+  const view = ballView(camera);
 
-function blobs(mask: Uint8Array, w: number, h: number): Blob[] {
-  const seen = new Uint8Array(w * h);
-  const out: Blob[] = [];
-  const stack: number[] = [];
-  for (let s = 0; s < w * h; s++) {
-    if (!mask[s] || seen[s]) continue;
-    const px: number[] = [];
-    stack.push(s);
-    seen[s] = 1;
-    while (stack.length) {
-      const p = stack.pop()!;
-      px.push(p);
-      const x = p % w;
-      const y = (p - x) / w;
-      for (let dy = -1; dy <= 1; dy++) {
-        for (let dx = -1; dx <= 1; dx++) {
-          const nx = x + dx;
-          const ny = y + dy;
-          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
-          const q = ny * w + nx;
-          if (mask[q] && !seen[q]) {
-            seen[q] = 1;
-            stack.push(q);
-          }
-        }
+  // Part of the picture that shows the bed.
+  const x0 = Math.max(0, Math.floor(Math.min(...corners.map((c) => c.x))));
+  const x1 = Math.min(w, Math.ceil(Math.max(...corners.map((c) => c.x))));
+  const y0 = Math.max(0, Math.floor(Math.min(...corners.map((c) => c.y))));
+  const y1 = Math.min(h, Math.ceil(Math.max(...corners.map((c) => c.y))));
+  const bw = x1 - x0;
+  const bh = y1 - y0;
+  if (bw < 20 || bh < 20) return [];
+  const inside = new Uint8Array(bw * bh);
+  const turn = Math.sign((corners[1].x - corners[0].x) * (corners[2].y - corners[0].y) - (corners[1].y - corners[0].y) * (corners[2].x - corners[0].x)) || 1;
+  for (let y = 0; y < bh; y++) {
+    for (let x = 0; x < bw; x++) {
+      let ok = 1;
+      for (let k = 0; k < 4 && ok; k++) {
+        const a = corners[k];
+        const b = corners[(k + 1) & 3];
+        if (((b.x - a.x) * (y + y0 + 0.5 - a.y) - (b.y - a.y) * (x + x0 + 0.5 - a.x)) * turn < 0) ok = 0;
+      }
+      inside[y * bw + x] = ok;
+    }
+  }
+
+  const mid = view.radius({ x: L / 2, y: W / 2 });
+  // Colours averaged over a small neighbourhood: screen patterns, grain and weave go away.
+  const blur = Math.max(1, Math.round(mid / 9));
+  const avg = boxBlur(data, w, h, x0, y0, bw, bh, blur);
+
+  // Cloth colour and brightness around every spot.
+  const tile = Math.max(16, Math.round(mid * 5));
+  const tw = Math.max(1, Math.ceil(bw / tile));
+  const th = Math.max(1, Math.ceil(bh / tile));
+  const cloth = new Float32Array(tw * th * 3);
+  const step = Math.max(1, Math.floor(tile / 14));
+  const sample = (ax: number, ay: number, bx: number, by: number, st: number): [number, number, number] | null => {
+    const cr: number[] = [];
+    const cg: number[] = [];
+    const lum: number[] = [];
+    for (let y = Math.max(0, ay); y < Math.min(bh, by); y += st) {
+      for (let x = Math.max(0, ax); x < Math.min(bw, bx); x += st) {
+        if (!inside[y * bw + x]) continue;
+        const o = (y * bw + x) * 3;
+        const s = avg[o] + avg[o + 1] + avg[o + 2] + 1e-3;
+        cr.push(avg[o] / s);
+        cg.push(avg[o + 1] / s);
+        lum.push(s);
       }
     }
-    out.push({ px });
+    return cr.length < 30 ? null : [median(cr), median(cg), median(lum)];
+  };
+  const whole = sample(0, 0, bw, bh, Math.max(1, Math.floor(Math.min(bw, bh) / 90)));
+  if (!whole) return [];
+  for (let ty = 0; ty < th; ty++) {
+    for (let tx = 0; tx < tw; tx++) {
+      const pad = Math.round(tile * 0.6);
+      let t = sample(tx * tile - pad, ty * tile - pad, (tx + 1) * tile + pad, (ty + 1) * tile + pad, step);
+      // A tile full of balls or cushion does not show its cloth.
+      if (!t || Math.hypot(t[0] - whole[0], t[1] - whole[1]) > 0.06 || t[2] < whole[2] * 0.4 || t[2] > whole[2] * 2) t = whole;
+      cloth.set(t, (ty * tw + tx) * 3);
+    }
+  }
+  // How far every pixel is from the cloth around it: colour, and brightness in logarithms.
+  const dc = new Float32Array(bw * bh);
+  const dl = new Float32Array(bw * bh);
+  for (let y = 0; y < bh; y++) {
+    const gy = Math.max(0, Math.min(th - 1, (y + 0.5) / tile - 0.5));
+    const ty = Math.min(th - 1, Math.floor(gy));
+    const ty2 = Math.min(th - 1, ty + 1);
+    const fy = gy - ty;
+    for (let x = 0; x < bw; x++) {
+      const gx = Math.max(0, Math.min(tw - 1, (x + 0.5) / tile - 0.5));
+      const tx = Math.min(tw - 1, Math.floor(gx));
+      const tx2 = Math.min(tw - 1, tx + 1);
+      const fx = gx - tx;
+      const at = (k: number) =>
+        (cloth[(ty * tw + tx) * 3 + k] * (1 - fx) + cloth[(ty * tw + tx2) * 3 + k] * fx) * (1 - fy) + (cloth[(ty2 * tw + tx) * 3 + k] * (1 - fx) + cloth[(ty2 * tw + tx2) * 3 + k] * fx) * fy;
+      const p = y * bw + x;
+      const o = p * 3;
+      const s = avg[o] + avg[o + 1] + avg[o + 2] + 1e-3;
+      dc[p] = Math.hypot(avg[o] / s - at(0), avg[o + 1] / s - at(1));
+      dl[p] = Math.log((s + 6) / (at(2) + 6));
+    }
+  }
+  // What counts as different depends on how noisy this cloth is.
+  const nc: number[] = [];
+  const nl: number[] = [];
+  const st = Math.max(1, Math.floor(Math.sqrt((bw * bh) / 8000)));
+  for (let y = 0; y < bh; y += st) {
+    for (let x = 0; x < bw; x += st) {
+      const p = y * bw + x;
+      if (inside[p]) nc.push(dc[p]), nl.push(Math.abs(dl[p]));
+    }
+  }
+  const tc = Math.min(0.06, Math.max(0.026, 4.5 * median(nc)));
+  const tl = Math.min(0.25, Math.max(0.085, 4.5 * median(nl)));
+  const ev = new Float32Array(bw * bh);
+  for (let p = 0; p < bw * bh; p++) {
+    const l = dl[p];
+    const d = Math.hypot(dc[p] / tc, l > 0 ? l / tl : l / 0.75);
+    // Darker cloth may be a shadow: some evidence, not proof.
+    ev[p] = d > 1 ? 1 : l < 0 ? 0.45 * Math.min(1, Math.max(0, (-l - 0.12) / 0.3)) : 0;
+  }
+
+  // Row sums make the share of evidence inside a disc cheap to look up.
+  const rowE = new Float32Array((bw + 1) * bh);
+  const rowN = new Float32Array((bw + 1) * bh);
+  for (let y = 0; y < bh; y++) {
+    for (let x = 0; x < bw; x++) {
+      const i = y * (bw + 1) + x;
+      const p = y * bw + x;
+      rowE[i + 1] = rowE[i] + (inside[p] ? ev[p] : 0);
+      rowN[i + 1] = rowN[i] + inside[p];
+    }
+  }
+  const disc = (cx: number, cy: number, r: number): [number, number] => {
+    let e = 0;
+    let n = 0;
+    const a = Math.max(0, Math.ceil(cy - r));
+    const b = Math.min(bh - 1, Math.floor(cy + r));
+    for (let y = a; y <= b; y++) {
+      const half = Math.sqrt(Math.max(0, r * r - (y - cy) ** 2));
+      const l = Math.max(0, Math.min(bw, Math.round(cx - half)));
+      const q = Math.max(l, Math.min(bw, Math.round(cx + half) + 1));
+      const i = y * (bw + 1);
+      e += rowE[i + q] - rowE[i + l];
+      n += rowN[i + q] - rowN[i + l];
+    }
+    return [e, n];
+  };
+  const C = Array.from({ length: 24 }, (_, i) => [Math.cos((i * Math.PI) / 12), Math.sin((i * Math.PI) / 12)]);
+  /** Share of the outline across which the colour changes. */
+  const outline = (cx: number, cy: number, r: number): number => {
+    let hit = 0;
+    let n = 0;
+    for (const [ux, uy] of C) {
+      const ix = Math.round(cx + ux * r * 0.8);
+      const iy = Math.round(cy + uy * r * 0.8);
+      const ox = Math.round(cx + ux * r * 1.22);
+      const oy = Math.round(cy + uy * r * 1.22);
+      if (ix < 0 || iy < 0 || ix >= bw || iy >= bh || ox < 0 || oy < 0 || ox >= bw || oy >= bh) continue;
+      n++;
+      const i = (iy * bw + ix) * 3;
+      const o = (oy * bw + ox) * 3;
+      const si = avg[i] + avg[i + 1] + avg[i + 2] + 1e-3;
+      const so = avg[o] + avg[o + 1] + avg[o + 2] + 1e-3;
+      const c = Math.hypot(avg[i] / si - avg[o] / so, avg[i + 1] / si - avg[o + 1] / so);
+      if (Math.hypot(c / tc, Math.log((si + 6) / (so + 6)) / Math.max(0.1, tl)) > 1) hit++;
+    }
+    return n < 12 ? 0 : hit / n;
+  };
+  const rate = (cx: number, cy: number): { score: number; pos: Vec2; r: number; fill: number } | null => {
+    const pos = view.toTable(cx + x0, cy + y0);
+    if (pos.x < R * 0.55 || pos.x > L - R * 0.55 || pos.y < R * 0.55 || pos.y > W - R * 0.55) return null;
+    const r = view.radius(pos);
+    const [e, n] = disc(cx, cy, r * 0.94);
+    if (n < 0.4 * Math.PI * r * r) return null;
+    const fill = e / n;
+    if (fill < 0.22) return null;
+    const [e2, n2] = disc(cx, cy, r * 1.5);
+    const [e1, n1] = disc(cx, cy, r * 1.1);
+    const ring = n2 > n1 ? (e2 - e1) / (n2 - n1) : 0;
+    const edge = outline(cx, cy, r);
+    return { score: fill - 0.45 * ring + 0.6 * edge, pos, r, fill };
+  };
+
+  const grid = Math.max(1, Math.round(mid / 8));
+  type Cand = { x: number; y: number; score: number; pos: Vec2; r: number; fill: number };
+  const cands: Cand[] = [];
+  for (let y = 0; y < bh; y += grid) {
+    for (let x = 0; x < bw; x += grid) {
+      const c = rate(x, y);
+      if (c && c.score > MIN_SCORE) cands.push({ x, y, ...c });
+    }
+  }
+  cands.sort((a, b) => b.score - a.score);
+  const used = new Uint8Array(bw * bh);
+  const spots: Spot[] = [];
+  for (const c of cands) {
+    if (spots.length >= MAX_SPOTS) break;
+    if (spots.some((s) => Math.hypot(s.pos.x - c.pos.x, s.pos.y - c.pos.y) < 1.65 * R)) continue;
+    // Finer look around the best grid point: the middle of the scores close to the top one.
+    let top: Cand = c;
+    const near: Cand[] = [];
+    const span = grid + 2;
+    for (let dy = -span; dy <= span; dy++) {
+      for (let dx = -span; dx <= span; dx++) {
+        const q = rate(c.x + dx, c.y + dy);
+        if (!q) continue;
+        const e: Cand = { x: c.x + dx, y: c.y + dy, ...q };
+        near.push(e);
+        if (e.score > top.score) top = e;
+      }
+    }
+    const close = near.filter((e) => e.score > top.score - 0.05);
+    const mx = close.length ? close.reduce((s, e) => s + e.x, 0) / close.length : top.x;
+    const my = close.length ? close.reduce((s, e) => s + e.y, 0) / close.length : top.y;
+    const pos = view.toTable(mx + x0, my + y0);
+    if (spots.some((s) => Math.hypot(s.pos.x - pos.x, s.pos.y - pos.y) < 1.65 * R)) continue;
+    // Most of the disc must be new: what is left between two balls already found is not a third.
+    let fresh = 0;
+    let total = 0;
+    let covered = 0;
+    const mark: number[] = [];
+    const rr = top.r * 0.94;
+    for (let y = Math.max(0, Math.ceil(my - rr)); y <= Math.min(bh - 1, my + rr); y++) {
+      for (let x = Math.max(0, Math.ceil(mx - rr)); x <= Math.min(bw - 1, mx + rr); x++) {
+        if ((x - mx) ** 2 + (y - my) ** 2 > rr * rr) continue;
+        total++;
+        const p = y * bw + x;
+        if (!used[p]) fresh += ev[p];
+        else covered++;
+        mark.push(p);
+      }
+    }
+    // Beside a ball already found, shadow does not count: a second ball must show itself.
+    if (covered > 0.12 * total) {
+      fresh = 0;
+      for (const p of mark) if (!used[p] && ev[p] === 1) fresh++;
+      if (fresh < 0.4 * total || fresh < 0.62 * (total - covered)) continue;
+    }
+    if (fresh < Math.min(0.42, 0.75 * top.fill) * total) continue;
+    for (const p of mark) used[p] = 1;
+    spots.push({ pos, x: mx + x0, y: my + y0, r: top.r, score: top.score });
+  }
+  return spots;
+}
+
+/** Mean colour around every pixel of a window of the picture. */
+function boxBlur(data: Raster['data'], w: number, h: number, x0: number, y0: number, bw: number, bh: number, r: number): Float32Array {
+  const tmp = new Float32Array(bw * bh * 3);
+  const out = new Float32Array(bw * bh * 3);
+  for (let y = 0; y < bh; y++) {
+    for (let k = 0; k < 3; k++) {
+      let s = 0;
+      let n = 0;
+      const at = (x: number) => data[((y + y0) * w + x + x0) * 4 + k];
+      for (let x = 0; x < Math.min(bw, r); x++) (s += at(x)), n++;
+      for (let x = 0; x < bw; x++) {
+        if (x + r < bw) (s += at(x + r)), n++;
+        if (x - r - 1 >= 0) (s -= at(x - r - 1)), n--;
+        tmp[(y * bw + x) * 3 + k] = s / n;
+      }
+    }
+  }
+  for (let x = 0; x < bw; x++) {
+    for (let k = 0; k < 3; k++) {
+      let s = 0;
+      let n = 0;
+      for (let y = 0; y < Math.min(bh, r); y++) (s += tmp[(y * bw + x) * 3 + k]), n++;
+      for (let y = 0; y < bh; y++) {
+        if (y + r < bh) (s += tmp[((y + r) * bw + x) * 3 + k]), n++;
+        if (y - r - 1 >= 0) (s -= tmp[((y - r - 1) * bw + x) * 3 + k]), n--;
+        out[(y * bw + x) * 3 + k] = s / n;
+      }
+    }
   }
   return out;
 }
 
-/** Split pixel coordinates into k groups around k centres (plain k-means, seeded along the long axis). */
-function split(pts: Vec2[], k: number): Vec2[][] {
-  let mx = 0;
-  let my = 0;
-  for (const p of pts) (mx += p.x), (my += p.y);
-  mx /= pts.length;
-  my /= pts.length;
-  let sxx = 0;
-  let sxy = 0;
-  let syy = 0;
-  for (const p of pts) {
-    sxx += (p.x - mx) ** 2;
-    sxy += (p.x - mx) * (p.y - my);
-    syy += (p.y - my) ** 2;
-  }
-  const ang = 0.5 * Math.atan2(2 * sxy, sxx - syy);
-  const ax = Math.cos(ang);
-  const ay = Math.sin(ang);
-  let lo = Infinity;
-  let hi = -Infinity;
-  for (const p of pts) {
-    const t = (p.x - mx) * ax + (p.y - my) * ay;
-    if (t < lo) lo = t;
-    if (t > hi) hi = t;
-  }
-  let centres: Vec2[] = [];
-  for (let i = 0; i < k; i++) {
-    const t = lo + ((i + 0.5) / k) * (hi - lo);
-    centres.push({ x: mx + ax * t, y: my + ay * t });
-  }
-  let groups: Vec2[][] = [];
-  for (let iter = 0; iter < 12; iter++) {
-    groups = centres.map(() => []);
-    for (const p of pts) {
-      let b = 0;
-      let bd = Infinity;
-      centres.forEach((c, i) => {
-        const d = (p.x - c.x) ** 2 + (p.y - c.y) ** 2;
-        if (d < bd) (bd = d), (b = i);
-      });
-      groups[b].push(p);
+/** Pixels of a ball's face that no other found ball covers more closely. */
+function facePixels(img: Raster, s: Spot, all: Spot[]): number[] {
+  const rgb: number[] = [];
+  const r = s.r * 0.84;
+  for (let y = Math.max(0, Math.ceil(s.y - r)); y <= Math.min(img.height - 1, s.y + r); y++) {
+    for (let x = Math.max(0, Math.ceil(s.x - r)); x <= Math.min(img.width - 1, s.x + r); x++) {
+      const d = Math.hypot(x - s.x, y - s.y);
+      if (d > r) continue;
+      if (all.some((o) => o !== s && Math.hypot(x - o.x, y - o.y) / o.r < d / s.r)) continue;
+      const i = (y * img.width + x) * 4;
+      rgb.push(img.data[i], img.data[i + 1], img.data[i + 2]);
     }
-    centres = groups.map((g, i) => (g.length ? { x: g.reduce((s, p) => s + p.x, 0) / g.length, y: g.reduce((s, p) => s + p.y, 0) / g.length } : centres[i]));
   }
-  return groups.filter((g) => g.length > 0);
+  return rgb;
 }
 
-/**
- * Finds balls in a flat picture of the bed (see `rectify`) and guesses their numbers.
- * `toImage` is the table -> photo transform; it tells which way the camera was looking so that
- * a ball photographed at an angle is placed where it touches the cloth, not where its top appears.
- */
-export function findBalls(flat: Raster, scale: number, mode: GameMode, toImage?: Homography): FoundBall[] {
-  const { width: w, height: h } = flat;
-  const cloth = medianCloth(flat);
-  const mask = new Uint8Array(w * h);
-  for (let p = 0; p < w * h; p++) {
-    const i = p * 4;
-    if (flat.data[i + 3] === 0) continue;
-    if (!looksLikeCloth(flat.data[i], flat.data[i + 1], flat.data[i + 2], cloth)) mask[p] = 1;
-  }
-  const rPx = R * scale;
-  const ballArea = Math.PI * rPx * rPx;
-  const toTable = (p: Vec2): Vec2 => ({ x: (p.x + 0.5) / scale, y: W - (p.y + 0.5) / scale });
-  const fromImage = toImage ? invertH(toImage) : null;
-
-  const found: FoundBall[] = [];
-  for (const b of blobs(mask, w, h)) {
-    if (b.px.length < ballArea * 0.3) continue;
-    const pts = b.px.map((p) => ({ x: p % w, y: Math.floor(p / w) }));
-    let x0 = Infinity;
-    let x1 = -Infinity;
-    let y0 = Infinity;
-    let y1 = -Infinity;
-    for (const p of pts) {
-      if (p.x < x0) x0 = p.x;
-      if (p.x > x1) x1 = p.x;
-      if (p.y < y0) y0 = p.y;
-      if (p.y > y1) y1 = p.y;
+export function findBalls(img: Raster, corners: Vec2[], horizontal: boolean, mode: GameMode): FoundBall[] {
+  let spots = locateBalls(img, corners, horizontal);
+  let faces = spots.map((s) => facePixels(img, s, spots));
+  const gain = lightGain(faces.map((f) => lookOf(f))) ?? undefined;
+  let looks: BallLook[] = faces.map((f) => lookOf(f, gain));
+  // Pocket mouths are dark discs too: near a pocket a dark one only counts when there is
+  // something lighter between it and the mouth.
+  const camera = cameraFromPlane(tableToImage(corners, horizontal), img.width, img.height);
+  const view = ballView(camera);
+  const lumAt = (p: Vec2) => {
+    const q = view.toImage(p);
+    const x = Math.round(q.x);
+    const y = Math.round(q.y);
+    if (x < 0 || y < 0 || x >= img.width || y >= img.height) return 0;
+    const i = (y * img.width + x) * 4;
+    return img.data[i] + img.data[i + 1] + img.data[i + 2];
+  };
+  const keep = spots.map((s, i) => {
+    const k = looks[i];
+    if (k.coloured >= 0.35 || k.white >= 0.5) return true;
+    for (const id of POCKET_IDS) {
+      const c = pocketCenter(id);
+      const d = Math.hypot(s.pos.x - c.x, s.pos.y - c.y);
+      if (d < (isSidePocket(id) ? 2.2 : 2.75) * R) return false;
+      if (d > 3.6 * R) continue;
+      const ux = (c.x - s.pos.x) / d;
+      const uy = (c.y - s.pos.y) / d;
+      const bed = lumAt({ x: s.pos.x - ux * 3 * R, y: s.pos.y - uy * 3 * R });
+      if ([1.15, 1.35, 1.6].every((f) => lumAt({ x: s.pos.x + ux * f * R, y: s.pos.y + uy * f * R }) < 0.45 * bed)) return false;
     }
-    // Long thin strips along an edge are rail or cushion showing through a slightly-off corner.
-    const bw = x1 - x0 + 1;
-    const bh = y1 - y0 + 1;
-    if (Math.min(bw, bh) < rPx * 1.1 && Math.max(bw, bh) > rPx * 4) continue;
-    if (b.px.length / (bw * bh) < 0.3) continue;
-    // A cue lying on the table: long, and much thinner than a ball.
-    let mx = 0;
-    let my = 0;
-    for (const p of pts) (mx += p.x), (my += p.y);
-    mx /= pts.length;
-    my /= pts.length;
-    let sxx = 0;
-    let sxy = 0;
-    let syy = 0;
-    for (const p of pts) {
-      sxx += (p.x - mx) ** 2;
-      sxy += (p.x - mx) * (p.y - my);
-      syy += (p.y - my) ** 2;
-    }
-    const tr = (sxx + syy) / pts.length;
-    const det = (sxx * syy - sxy * sxy) / (pts.length * pts.length);
-    const minor = Math.sqrt(Math.max(0, tr / 2 - Math.sqrt(Math.max(0, (tr * tr) / 4 - det))));
-    if (minor < 0.3 * rPx) continue;
-    // Anything much bigger than a full rack is not balls.
-    if (b.px.length > ballArea * 14) continue;
-    // Rail, cushion face or floor showing at the edge of the flat picture: only something
-    // shaped like a single ball is kept there.
-    const major = Math.sqrt(Math.max(0, tr / 2 + Math.sqrt(Math.max(0, (tr * tr) / 4 - det))));
-    const atEdge = x0 <= 0 || y0 <= 0 || x1 >= w - 1 || y1 >= h - 1;
-    if (atEdge && !(b.px.length > 0.5 * ballArea && b.px.length < 1.7 * ballArea && minor > 0.33 * rPx && major < 0.95 * rPx)) continue;
-
-    // Seen from the side, a ball's picture laid flat on the table is stretched away from the
-    // camera. The local stretch of the photo -> table mapping says by how much.
-    let stretch = 1;
-    if (toImage && fromImage) {
-      const c = toTable({ x: mx, y: my });
-      const ip = applyH(toImage, c);
-      const a = applyH(fromImage, { x: ip.x + 1, y: ip.y });
-      const d = applyH(fromImage, { x: ip.x, y: ip.y + 1 });
-      const j11 = a.x - c.x;
-      const j21 = a.y - c.y;
-      const j12 = d.x - c.x;
-      const j22 = d.y - c.y;
-      const q = j11 * j11 + j12 * j12 + j21 * j21 + j22 * j22;
-      const dt = Math.abs(j11 * j22 - j12 * j21);
-      const root = Math.sqrt(Math.max(0, q * q - 4 * dt * dt));
-      const big = Math.sqrt((q + root) / 2);
-      const small = Math.sqrt(Math.max(1e-18, (q - root) / 2));
-      stretch = Math.max(1, Math.min(6, big / small));
-    }
-    const one = ballArea * stretch;
-    const k = Math.max(1, Math.min(10, Math.floor(b.px.length / one + 0.35)));
-    for (const g of k === 1 ? [pts] : split(pts, k)) {
-      if (g.length < one * 0.3) continue;
-      let cx = 0;
-      let cy = 0;
-      for (const p of g) (cx += p.x), (cy += p.y);
-      cx /= g.length;
-      cy /= g.length;
-      let pos = toTable({ x: cx, y: cy });
-      if (toImage && fromImage && k === 1) {
-        // Direction on the table that points away from the camera at this spot.
-        const ip = applyH(toImage, pos);
-        const far = applyH(fromImage, { x: ip.x, y: ip.y - 8 });
-        const d = Math.hypot(far.x - pos.x, far.y - pos.y);
-        if (d > 1e-9) {
-          const ux = (far.x - pos.x) / d;
-          const uy = (far.y - pos.y) / d;
-          let near = Infinity;
-          let farT = -Infinity;
-          for (const p of g) {
-            const t = toTable(p);
-            const along = (t.x - pos.x) * ux + (t.y - pos.y) * uy;
-            if (along < near) near = along;
-            if (along > farT) farT = along;
-          }
-          // A ball seen from the side smears away from the camera; its near edge is still true.
-          if (farT - near > 2.4 * R) pos = { x: pos.x + ux * (near + R), y: pos.y + uy * (near + R) };
-        }
-      }
-      const raw = pos;
-      pos = { x: Math.max(R, Math.min(L - R, pos.x)), y: Math.max(R, Math.min(W - R, pos.y)) };
-      // Colours from the middle of the ball only: the rim mixes with cloth and shadow.
-      const rgb: number[] = [];
-      for (const p of g) {
-        if (stretch < 1.3 && (p.x - cx) ** 2 + (p.y - cy) ** 2 > (0.85 * rPx) ** 2) continue;
-        const i = (p.y * w + p.x) * 4;
-        rgb.push(flat.data[i], flat.data[i + 1], flat.data[i + 2]);
-      }
-      const guess = classifyBall(rgb, mode);
-      // Pocket openings are dark blobs too: near a pocket, only a ball with a colour counts.
-      let atPocket = false;
-      for (const id of POCKET_IDS) {
-        const c = pocketCenter(id);
-        if (Math.hypot(raw.x - c.x, raw.y - c.y) < (isSidePocket(id) ? 2.0 : 2.6) * R) atPocket = true;
-      }
-      if (atPocket && (guess.id === null || guess.id === 8)) continue;
-      found.push({ pos, id: guess.id, confidence: guess.confidence });
-    }
-  }
-  // One ball per number: the most convincing keeps it, the rest are left for the player to name.
-  const best = new Map<number, FoundBall>();
-  for (const f of found) {
-    if (f.id === null) continue;
-    const cur = best.get(f.id);
-    if (!cur || f.confidence > cur.confidence) best.set(f.id, f);
-  }
-  for (const f of found) if (f.id !== null && best.get(f.id) !== f) (f.id = null), (f.confidence = 0);
-  return found;
+    return true;
+  });
+  spots = spots.filter((_, i) => keep[i]);
+  looks = looks.filter((_, i) => keep[i]);
+  const names = nameBalls(looks, mode);
+  return spots.map((s, i) => ({
+    pos: { x: Math.max(R, Math.min(L - R, s.pos.x)), y: Math.max(R, Math.min(W - R, s.pos.y)) },
+    id: names[i].id,
+    confidence: names[i].confidence,
+  }));
 }
