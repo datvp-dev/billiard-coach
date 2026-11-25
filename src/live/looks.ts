@@ -1,3 +1,4 @@
+import type { Vec2 } from '../core/types';
 import type { BallLook } from '../vision/classify';
 
 /** What one particular ball has looked like so far in this stream. */
@@ -21,6 +22,15 @@ export function lookGap(a: BallLook, b: BallLook): number {
   const shares = (Math.abs(a.white - b.white) * 1.6 + Math.abs(a.black - b.black) * 2 + Math.abs(a.coloured - b.coloured) * 1.6) / 1.4;
   const lum = (k: BallLook) => (k.bright[0] + k.bright[1] + k.bright[2]) / 765;
   return hue + sat + val + shares + Math.abs(lum(a) - lum(b)) * 2;
+}
+
+/** Faces found where balls of a known number lie. */
+export function knownFaces(found: { pos: Vec2; look?: BallLook; attached?: boolean }[], balls: { id: number | null; pos: Vec2 }[]): { id: number; look: BallLook }[] {
+  return balls.flatMap((b) => {
+    if (b.id === null) return [];
+    const f = found.find((x) => x.look && !x.attached && Math.hypot(x.pos.x - b.pos.x, x.pos.y - b.pos.y) < 0.02);
+    return f ? [{ id: b.id, look: f.look! }] : [];
+  });
 }
 
 /** A running average; early looks count fully, later ones nudge it. */

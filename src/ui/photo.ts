@@ -1,14 +1,16 @@
 import { TABLE } from '../core/config';
+import { BALL_SETS, FELTS, ballSet, inkOn, type Equipment } from '../core/equipment';
 import { ballIdsForMode } from '../core/table';
 import type { GameMode, Layout, Vec2 } from '../core/types';
 import { BALL_Z } from '../vision/balls';
+import { setOf } from '../vision/classify';
 import { detectBalls, guessCorners } from '../vision/detect';
 import { snapToSight, type FoundSights } from '../vision/findSights';
 import { frameView, type FrameView, type TableFrame } from '../vision/frame';
 import { TRUE_LENS, straightenImage } from '../vision/lens';
 import type { Raster } from '../vision/raster';
 import { SIGHTS } from '../vision/sights';
-import { cornersInPicture, describeFrame, newSetup, noseHandle, preview, search, type FrameSetup } from './frameSetup';
+import { cornersInPicture, describeFrame, firstSetup, newSetup, noseHandle, preview, search, type FrameSetup } from './frameSetup';
 import { assignNumber, fitImage, markersToLayout, nearestIndex, type Marker } from './photoModel';
 import { ballColor } from './tableView';
 
@@ -74,7 +76,7 @@ type Grip = { kind: 'corner' | 'sight' | 'nose'; i: number };
  * Photo -> layout, entirely on the device. Two steps in a full-screen sheet: check that the table's
  * diamonds were found and put right any that were not, then check the balls and fix their numbers.
  */
-export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; place(layout: Layout): void }): { pick(): void; openFrame(frame: HTMLCanvasElement, req: FrameRequest): void } {
+export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; equipment(): Equipment; setEquipment(patch: Partial<Equipment>): void; place(layout: Layout): void }): { pick(): void; openFrame(frame: HTMLCanvasElement, req: FrameRequest): void } {
   const input = el('input');
   input.type = 'file';
   input.accept = 'image/*';
@@ -113,6 +115,10 @@ export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; p
   let from = { x: 0, y: 0 };
   let moved = false;
   let markers: Marker[] = [];
+  /** The markers are as the app found them: naming them afresh loses nothing. */
+  let untouched = false;
+  /** The set the balls look like, when that was left to the app. */
+  let seems = '';
   let selected = -1;
   /** A ball being moved by hand: which one, where the finger started, and whether it has moved. */
   let moving: { i: number; from: Vec2; on: boolean; wasSelected: boolean } | null = null;
@@ -143,6 +149,30 @@ export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; p
       setup = { ...setup, rough: cornersInPicture(found.cal, raster.width, raster.height) };
     }
     setFrame(found.cal);
+  }
+
+  function findBalls() {
+    if (!raster) return;
+    const balls = detectBalls(straightenImage(raster, frame.lens), frame.corners, frame.horizontal, deps.mode(), deps.equipment().balls);
+    markers = balls.map((f) => ({ pos: f.pos, id: f.id }));
+    untouched = true;
+    selected = -1;
+    const set = setOf(balls.flatMap((f) => (f.id !== null && f.look ? [{ id: f.id, look: f.look }] : [])));
+    seems = set ? ballSet(set).name : '';
+  }
+
+  /** A choice of equipment, kept for next time. */
+  function choose(label: string, options: { id: string; name: string }[], value: string, fn: (id: string) => void): HTMLSelectElement {
+    const s = el('select');
+    s.setAttribute('aria-label', label);
+    for (const o of options) {
+      const opt = el('option', '', `${label}: ${o.name}`);
+      opt.value = o.id;
+      s.append(opt);
+    }
+    s.value = value;
+    s.addEventListener('change', () => fn(s.value));
+    return s;
   }
 
   /** Start over from roughly where the table is now, forgetting what was set by hand. */
@@ -261,13 +291,21 @@ export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; p
           find();
           refresh();
         }),
+        choose('Nỉ', [{ id: 'auto', name: 'tự nhận' }, ...FELTS.map((f) => ({ id: f.id as string, name: f.name }))], deps.equipment().felt, (id) => {
+          deps.setEquipment({ felt: id as Equipment['felt'] });
+          // Where the sights already hold the table there is nothing to look for again.
+          if (!found?.sure && raster) {
+            guess();
+            find();
+          }
+          refresh();
+        }),
       );
       actions.append(
         button('Hủy', 'ghost', close),
         button('Tìm bi', 'primary', () => {
           if (!raster) return;
-          markers = detectBalls(straightenImage(raster, frame.lens), frame.corners, frame.horizontal, deps.mode()).map((f) => ({ pos: f.pos, id: f.id }));
-          selected = -1;
+          findBalls();
           step = 'review';
           refresh();
         }),
@@ -280,21 +318,32 @@ export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; p
       markers.length === 0
         ? 'Không thấy bi nào. Chạm vào ảnh ở chỗ có bi để thêm, hoặc quay lại chỉnh góc.'
         : `Thấy ${markers.length} bi. Chạm vào một bi để sửa số, kéo để dời; chạm chỗ trống để thêm bi.${unknown ? ` Còn ${unknown} bi "?" chưa có số sẽ bị bỏ qua.` : ''}`;
+    if (untouched && selected < 0) {
+      picker.append(
+        choose('Bộ bi', [{ id: 'auto', name: seems && deps.equipment().balls === 'auto' ? `tự nhận (${seems})` : 'tự nhận' }, ...BALL_SETS.map((s) => ({ id: s.id as string, name: s.name }))], deps.equipment().balls, (id) => {
+          deps.setEquipment({ balls: id as Equipment['balls'] });
+          findBalls();
+          refresh();
+        }),
+      );
+    }
     if (selected >= 0 && markers[selected]) {
       const cur = markers[selected].id;
       for (const id of ballIdsForMode(deps.mode())) {
         const b = button(id === 0 ? 'Cái' : String(id), 'num', () => {
           markers = assignNumber(markers, selected, id);
+          untouched = false;
           renderChrome();
           draw();
         });
-        b.style.setProperty('--c', ballColor(id).fill);
+        b.style.setProperty('--c', ballColor(id, deps.equipment()).fill);
         b.setAttribute('aria-pressed', String(cur === id));
         picker.append(b);
       }
       picker.append(
         button('Xóa', 'num del', () => {
           markers = markers.filter((_, i) => i !== selected);
+          untouched = false;
           selected = -1;
           renderChrome();
           draw();
@@ -312,6 +361,7 @@ export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; p
         ? [
             button('Xóa hết', 'ghost', () => {
               markers = [];
+              untouched = false;
               selected = -1;
               renderChrome();
               draw();
@@ -432,7 +482,7 @@ export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; p
       const tw = ctx.measureText(label).width + 10;
       const lx = c.x - tw / 2;
       const ly = c.y - r - 20;
-      ctx.fillStyle = m.id === null ? '#ef6b5e' : m.id === 0 ? '#f6f2e6' : ballColor(m.id).fill;
+      ctx.fillStyle = m.id === null ? '#ef6b5e' : m.id === 0 ? '#f6f2e6' : ballColor(m.id, deps.equipment()).fill;
       ctx.beginPath();
       ctx.roundRect?.(lx, ly, tw, 18, 9);
       if (!ctx.roundRect) ctx.rect(lx, ly, tw, 18);
@@ -440,7 +490,7 @@ export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; p
       ctx.strokeStyle = '#0e1512';
       ctx.lineWidth = 1;
       ctx.stroke();
-      ctx.fillStyle = m.id === null || m.id === 8 || m.id === 2 || m.id === 4 || m.id === 7 || m.id === 10 ? '#fff' : '#17181a';
+      ctx.fillStyle = m.id === null ? '#fff' : m.id === 0 ? '#17181a' : inkOn(ballColor(m.id, deps.equipment()).fill);
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText(label, c.x, ly + 9.5);
@@ -549,6 +599,7 @@ export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; p
       const t = ballFrom(p);
       if (t.x > 0 && t.x < L && t.y > 0 && t.y < W) {
         markers = [...markers, { pos: onBed(t), id: null }];
+        untouched = false;
         selected = markers.length - 1;
       } else selected = -1;
     }
@@ -561,6 +612,7 @@ export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; p
       if (!moving.on && Math.hypot(q.x - moving.from.x, q.y - moving.from.y) < 6) return;
       moving.on = true;
       const t = onBed(ballFrom(q));
+      untouched = false;
       const i = moving.i;
       markers = markers.map((m, k) => (k === i ? { ...m, pos: t } : m));
       draw();
@@ -597,6 +649,7 @@ export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; p
   // Fine adjustment with the keyboard.
   window.addEventListener('keydown', (e) => {
     if (sheet.hidden || step !== 'corners' || !picked || !found) return;
+    if (e.target instanceof HTMLSelectElement) return;
     const step1 = e.shiftKey ? 4 : 0.5;
     const d = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[e.key];
     if (!d) return;
@@ -627,10 +680,23 @@ export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; p
     load(photo);
   }
 
+  /** A first idea of where the table is, from the colour of its cloth. */
+  function guess() {
+    if (!raster) return;
+    const { width: w, height: h } = raster;
+    // The cloth as chosen first, then whatever looks most like a table: the choice may be an old one.
+    const felt = deps.equipment().felt;
+    const ideas = (felt === 'auto' ? [guessCorners(raster)] : [guessCorners(raster, felt), guessCorners(raster)]).filter((g) => g !== null);
+    guessed = ideas.length > 0;
+    const at = (x: number, y: number) => ({ x: x * w, y: y * h });
+    setup = firstSetup(raster, ideas) ?? newSetup([at(0.15, 0.15), at(0.85, 0.15), at(0.85, 0.85), at(0.15, 0.85)], w >= h);
+  }
+
   /** Start on a picture: read its pixels and find the table, unless it is known already. */
   function load(source: HTMLCanvasElement, start?: { frame: TableFrame; setup: FrameSetup }) {
     photo = source;
     const { width: w, height: h } = source;
+    untouched = false;
     const data = source.getContext('2d', { willReadFrequently: true })!.getImageData(0, 0, w, h);
     raster = { width: data.width, height: data.height, data: data.data };
     found = null;
@@ -642,10 +708,7 @@ export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; p
       guessed = true;
       setFrame(start.frame);
     } else {
-      const g = guessCorners(raster);
-      guessed = !!g;
-      const at = (x: number, y: number) => ({ x: x * w, y: y * h });
-      setup = newSetup(g ? g.corners : [at(0.15, 0.15), at(0.85, 0.15), at(0.85, 0.85), at(0.15, 0.85)], g ? g.horizontal : w >= h);
+      guess();
     }
     if (step === 'corners') find();
     renderChrome();

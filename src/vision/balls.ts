@@ -1,4 +1,5 @@
 import { PHYS, TABLE } from '../core/config';
+import type { BallSetChoice } from '../core/equipment';
 import { POCKET_IDS, isSidePocket, pocketCenter } from '../core/table';
 import type { GameMode, Vec2 } from '../core/types';
 import { cameraFromPlane, type Camera } from './camera';
@@ -549,14 +550,14 @@ function facePixels(img: Raster, s: Spot, all: Spot[]): number[] {
   return rgb;
 }
 
-export function findBalls(img: Raster, corners: Vec2[], horizontal: boolean, mode: GameMode): FoundBall[] {
+export function findBalls(img: Raster, corners: Vec2[], horizontal: boolean, mode: GameMode, set: BallSetChoice = 'auto'): FoundBall[] {
     // On a single picture, round bits of something long beside a rail are lettering or the rail itself.
   const spots = locateBalls(img, corners, horizontal).filter((s) => !s.attached || Math.min(s.pos.x, L - s.pos.x, s.pos.y, W - s.pos.y) > 1.6 * R);
-  return nameSpots(img, corners, horizontal, mode, spots);
+  return nameSpots(img, corners, horizontal, mode, spots, set);
 }
 
 /** Sorts out pocket mouths and gives the remaining spots their numbers. */
-export function nameSpots(img: Raster, corners: Vec2[], horizontal: boolean, mode: GameMode, all: Spot[]): FoundBall[] {
+export function nameSpots(img: Raster, corners: Vec2[], horizontal: boolean, mode: GameMode, all: Spot[], set: BallSetChoice = 'auto'): FoundBall[] {
   let spots = all;
   let faces = spots.map((s) => facePixels(img, s, spots));
   const gain = lightGain(faces.map((f) => lookOf(f))) ?? undefined;
@@ -590,7 +591,7 @@ export function nameSpots(img: Raster, corners: Vec2[], horizontal: boolean, mod
   });
   spots = spots.filter((_, i) => keep[i]);
   looks = looks.filter((_, i) => keep[i]);
-  const names = nameBalls(looks, mode);
+  const names = nameBalls(looks, mode, set);
   return spots.map((s, i) => ({
     pos: { x: Math.max(R, Math.min(L - R, s.pos.x)), y: Math.max(R, Math.min(W - R, s.pos.y)) },
     id: names[i].id,

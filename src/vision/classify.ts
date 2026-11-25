@@ -1,3 +1,4 @@
+import type { BallSetChoice, BallSetId } from '../core/equipment';
 import { ballIdsForMode } from '../core/table';
 import type { GameMode } from '../core/types';
 import { rgbToHsv } from './raster';
@@ -17,11 +18,12 @@ export type BallLook = {
 };
 
 type Proto = { h: number; s: number; v: number };
-type Palette = { name: string; solid: Record<number, Proto>; /** Other shades the same number comes in. */ also?: Record<number, Proto>; /** Stripes are banded with black instead of white. */ darkStripes: boolean };
+type Palette = { id: BallSetId; /** How much better it must fit than the usual sets to be believed unasked. */ rare: number; solid: Record<number, Proto>; /** Other shades the same number comes in. */ also?: Record<number, Proto>; /** Stripes are banded with black instead of white. */ darkStripes: boolean };
 
 const PALETTES: Palette[] = [
   {
-    name: 'standard',
+    id: 'standard',
+    rare: 0,
     darkStripes: false,
     solid: {
       1: { h: 46, s: 0.85, v: 0.92 },
@@ -35,7 +37,8 @@ const PALETTES: Palette[] = [
   },
   {
     // Sets made for television: pink 4, light brown 7, black-banded stripes.
-    name: 'television',
+    id: 'tvdark',
+    rare: 0,
     darkStripes: true,
     solid: {
       1: { h: 42, s: 0.8, v: 0.88 },
@@ -48,6 +51,57 @@ const PALETTES: Palette[] = [
     },
     also: {
       4: { h: 15, s: 0.56, v: 0.95 },
+    },
+  },
+  {
+    // Aramith Pro-Cup TV: the pink 4 and light brown 7, on an otherwise ordinary set.
+    id: 'protv',
+    rare: 0.8,
+    darkStripes: false,
+    solid: {
+      1: { h: 45, s: 0.83, v: 0.92 },
+      2: { h: 219, s: 0.76, v: 0.64 },
+      3: { h: 357, s: 0.82, v: 0.75 },
+      4: { h: 346, s: 0.4, v: 0.96 },
+      5: { h: 22, s: 0.83, v: 0.94 },
+      6: { h: 152, s: 0.7, v: 0.42 },
+      7: { h: 28, s: 0.55, v: 0.64 },
+    },
+    also: {
+      4: { h: 15, s: 0.56, v: 0.95 },
+    },
+  },
+  {
+    // Predator Arcos II, Dynaspheres Palladium TV: light purple 4, brown 7.
+    id: 'arcos',
+    rare: 0.8,
+    darkStripes: false,
+    solid: {
+      1: { h: 43, s: 0.85, v: 0.93 },
+      2: { h: 208, s: 0.85, v: 0.62 },
+      3: { h: 354, s: 0.82, v: 0.84 },
+      4: { h: 290, s: 0.36, v: 0.54 },
+      5: { h: 15, s: 0.83, v: 0.93 },
+      6: { h: 160, s: 0.8, v: 0.4 },
+      7: { h: 25, s: 0.82, v: 0.52 },
+    },
+  },
+  {
+    // Aramith Tournament Black: pink 4, purple 5, bright green 6, brown 7, black-banded stripes.
+    id: 'black',
+    rare: 0.8,
+    darkStripes: true,
+    solid: {
+      1: { h: 43, s: 0.88, v: 0.95 },
+      2: { h: 212, s: 0.85, v: 0.64 },
+      3: { h: 358, s: 0.88, v: 0.86 },
+      4: { h: 350, s: 0.52, v: 0.98 },
+      5: { h: 264, s: 0.48, v: 0.62 },
+      6: { h: 160, s: 0.82, v: 0.54 },
+      7: { h: 24, s: 0.82, v: 0.62 },
+    },
+    also: {
+      4: { h: 12, s: 0.5, v: 0.96 },
     },
   },
 ];
@@ -130,19 +184,23 @@ function fitCost(k: BallLook, id: number, pal: Palette): number {
 
 /** A ball that fits nothing better than this stays unnamed. */
 const UNNAMED = 3;
+/** With the set known there is less to be mistaken about. */
+const UNNAMED_KNOWN = 4.2;
 
 export type Naming = { id: number | null; confidence: number };
 
 /**
  * Names all balls at once: every number is used at most once, so a red ball beside a darker red
- * one becomes the 3 and the other the 7. Tries each known set of ball colours and keeps the one
- * that fits best.
+ * one becomes the 3 and the other the 7. With the set of balls known only its colours count;
+ * otherwise each known set is tried and the one that fits best kept.
  */
-export function nameBalls(looks: BallLook[], mode: GameMode): Naming[] {
+export function nameBalls(looks: BallLook[], mode: GameMode, choice: BallSetChoice = 'auto'): Naming[] {
   const ids = ballIdsForMode(mode);
   const size = 1 << ids.length;
+  const unnamed = choice === 'auto' ? UNNAMED : UNNAMED_KNOWN;
   let best: { total: number; names: Naming[] } | null = null;
   for (const pal of PALETTES) {
+    if (choice !== 'auto' && pal.id !== choice) continue;
     const cost = looks.map((k) => ids.map((id) => fitCost(k, id, pal)));
     let dp = new Float64Array(size).fill(Infinity);
     dp[0] = 0;
@@ -152,7 +210,7 @@ export function nameBalls(looks: BallLook[], mode: GameMode): Naming[] {
       const bk = new Int8Array(size).fill(-1);
       for (let m = 0; m < size; m++) {
         if (dp[m] === Infinity) continue;
-        if (dp[m] + UNNAMED < nd[m]) (nd[m] = dp[m] + UNNAMED), (bk[m] = -1);
+        if (dp[m] + unnamed < nd[m]) (nd[m] = dp[m] + unnamed), (bk[m] = -1);
         for (let k = 0; k < ids.length; k++) {
           if (m & (1 << k)) continue;
           const v = dp[m] + cost[i][k];
@@ -165,17 +223,26 @@ export function nameBalls(looks: BallLook[], mode: GameMode): Naming[] {
     }
     let m = 0;
     for (let k = 1; k < size; k++) if (dp[k] < dp[m]) m = k;
-    const total = dp[m];
+    const total = dp[m] + pal.rare;
     const names: Naming[] = looks.map(() => ({ id: null, confidence: 0 }));
     for (let i = looks.length - 1; i >= 0; i--) {
       const k = back[i][m];
       if (k < 0) continue;
-      names[i] = { id: ids[k], confidence: Math.max(0.05, 1 - cost[i][k] / UNNAMED) };
+      names[i] = { id: ids[k], confidence: Math.max(0.05, 1 - cost[i][k] / unnamed) };
       m ^= 1 << k;
     }
     if (!best || total < best.total) best = { total, names };
   }
   return best!.names;
+}
+
+/** How much better the best set must fit than the next to be told apart from it. */
+const CLEARLY = 1.5;
+
+/** Which set the balls belong to, from balls whose numbers are known; null when several would do. */
+export function setOf(known: { id: number; look: BallLook }[]): BallSetId | null {
+  const cost = PALETTES.map((pal) => ({ id: pal.id, sum: pal.rare + known.reduce((t, k) => t + (k.id === 0 || k.id === 8 ? 0 : Math.min(4, fitCost(k.look, k.id, pal))), 0) })).sort((a, b) => a.sum - b.sum);
+  return cost[1].sum - cost[0].sum >= CLEARLY ? cost[0].id : null;
 }
 
 /** Light colour from the ball that looks most like a cue ball, as gains; null when none does. */

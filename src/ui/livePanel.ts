@@ -1,10 +1,13 @@
 import { TABLE } from '../core/config';
+import { inkOn, type BallSetId, type Equipment } from '../core/equipment';
 import type { GameMode, Layout, Vec2 } from '../core/types';
+import { knownFaces } from '../live/looks';
 import { parseLiveLink } from '../live/link';
 import { createTracker, type LiveStatus, type Tracker } from '../live/tracker';
 import type { ViewSignature } from '../live/view';
 import type { ClothModel } from '../vision/balls';
 import { BALL_Z } from '../vision/balls';
+import { setOf } from '../vision/classify';
 import { frameView, type TableFrame } from '../vision/frame';
 import type { LiveReply } from '../worker/live.worker';
 import { createLiveClient } from '../worker/liveClient';
@@ -49,6 +52,7 @@ export type LivePanelDeps = {
   root: HTMLElement;
   storage: StorageLike | null;
   mode(): GameMode;
+  equipment(): Equipment;
   place(layout: Layout): void;
   openFrame(frame: HTMLCanvasElement, req: FrameRequest): void;
   onToggle(open: boolean): void;
@@ -104,6 +108,9 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
   let ref: ViewSignature | null = null;
   /** The cloth as it was on the frame the player marked, with nobody over the table. */
   let cloth: ClothModel | null = null;
+  /** The set the checked balls turned out to be, when the player has not said. */
+  let seems: BallSetId | null = null;
+  const balls = () => (deps.equipment().balls === 'auto' ? seems ?? 'auto' : deps.equipment().balls);
   let paused = false;
   /** The app's table as this panel last knew it. */
   let board: Layout | null = null;
@@ -220,7 +227,7 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
     const img = frame.getContext('2d', { willReadFrequently: true })!.getImageData(0, 0, width, height);
     let r: LiveReply | null = null;
     try {
-      r = await client.look({ width, height, data: img.data, ...start.frame, mode: deps.mode(), check: [], ref, cloth, sure: [], renew: false });
+      r = await client.look({ width, height, data: img.data, ...start.frame, mode: deps.mode(), check: [], ref, cloth, sure: [], renew: false, set: balls() });
     } catch {
       // told below
     }
@@ -304,6 +311,7 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
     ref = null;
     cloth = null;
     stale = false;
+    seems = null;
     paused = false;
     message = why;
     render();
@@ -374,7 +382,7 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
       const t = tracker;
       const asked = edits;
       try {
-        const r = await client.look({ width, height, data: img.data, ...sized(choice, width, height).frame, mode: deps.mode(), check: t.watched(), ref, cloth, sure: t.places(), renew: stale && t.status() === 'steady' });
+        const r = await client.look({ width, height, data: img.data, ...sized(choice, width, height).frame, mode: deps.mode(), check: t.watched(), ref, cloth, sure: t.places(), renew: stale && t.status() === 'steady', set: balls() });
         if (mine !== run) return;
         // A frame with somebody over the table is no measure of what is always there: wait for a clear one.
         // After a correction the old one is wrong about which things are balls.
@@ -385,6 +393,8 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
         if (still) {
           ref = r.signature;
           t.meet(r.balls);
+          // The player has just checked the numbers: they say which set this is.
+          seems = setOf(knownFaces(r.balls, t.balls())) ?? seems;
         } else if (!paused && !editing && asked === edits) {
           const layout = t.look({ balls: r.balls, clear: r.clear, sameView: r.sameView, cover: r.cover });
           if (layout) put(layout);
@@ -462,12 +472,12 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
       ctx.globalAlpha = b.hidden ? 0.5 : 1;
       ctx.beginPath();
       ctx.arc(q.x, y, 7 * dpr, 0, Math.PI * 2);
-      ctx.fillStyle = b.id === null ? '#ef6b5e' : ballColor(b.id).fill;
+      ctx.fillStyle = b.id === null ? '#ef6b5e' : ballColor(b.id, deps.equipment()).fill;
       ctx.fill();
       ctx.strokeStyle = '#0e1512';
       ctx.lineWidth = dpr;
       ctx.stroke();
-      ctx.fillStyle = b.id !== null && [2, 4, 7, 8, 10].includes(b.id) ? '#fff' : '#17181a';
+      ctx.fillStyle = b.id === null ? '#17181a' : inkOn(ballColor(b.id, deps.equipment()).fill);
       ctx.fillText(b.id === null ? '?' : b.id === 0 ? 'C' : String(b.id), q.x, y + 0.5 * dpr);
     }
     ctx.globalAlpha = 1;

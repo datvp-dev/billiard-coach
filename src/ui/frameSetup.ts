@@ -22,6 +22,13 @@ export function newSetup(rough: Vec2[], horizontal: boolean): FrameSetup {
   return { horizontal, rough, hand: SIGHTS.map(() => null), off: SIGHTS.map(() => false), noses: [null, null, null, null] };
 }
 
+/** The first of these ideas of where the table is that its sights bear out; failing that, the first. */
+export function firstSetup(img: Raster, ideas: { corners: Vec2[]; horizontal: boolean }[]): FrameSetup | null {
+  const all = ideas.map((g) => newSetup(g.corners, g.horizontal));
+  if (all.length < 2) return all[0] ?? null;
+  return all.find((s) => search(img, s).sure) ?? all[0];
+}
+
 /** The same setup on the same view at another size. */
 export function scaleSetup(s: FrameSetup, kx: number, ky: number): FrameSetup {
   const at = (p: Vec2) => ({ x: p.x * kx, y: p.y * ky });

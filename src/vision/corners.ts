@@ -1,3 +1,4 @@
+import { felt as feltOf, type FeltChoice } from '../core/equipment';
 import type { Vec2 } from '../core/types';
 import { cameraFromPlane } from './camera';
 import { makeRaster, rgbToHsv, toneOf, type Raster, type Tone } from './raster';
@@ -10,7 +11,17 @@ type ClothTone = Tone & { sat: number };
  * middle, and a little more so for the usual green and blue. Grey and other pale cloths are
  * included; which tone really is the table is decided by the shape of the area it covers.
  */
-export function clothTones(img: Raster, limit = 10): ClothTone[] {
+/** Whether a tone could be a cloth of that colour, in whatever light. */
+function isFelt(t: ClothTone, choice: FeltChoice): boolean {
+  if (choice === 'auto') return true;
+  const f = feltOf(choice);
+  if (t.sat < f.sat[0] || t.sat > f.sat[1] || t.lum < f.lum[0] || t.lum > f.lum[1]) return false;
+  if (!f.hue) return true;
+  const [hue] = rgbToHsv(t.cr, t.cg, Math.max(0, 1 - t.cr - t.cg));
+  return (hue >= f.hue[0] && hue <= f.hue[1]) || (hue + 360 >= f.hue[0] && hue + 360 <= f.hue[1]);
+}
+
+export function clothTones(img: Raster, limit = 10, choice: FeltChoice = 'auto'): ClothTone[] {
   const BINS = 30;
   const LUM = 10;
   const size = BINS * BINS * LUM;
@@ -26,7 +37,7 @@ export function clothTones(img: Raster, limit = 10): ClothTone[] {
       const g = img.data[i + 1];
       const b = img.data[i + 2];
       const t = toneOf(r, g, b);
-      if (t.lum < 0.08) continue;
+      if (t.lum < (choice === 'auto' ? 0.08 : 0.02)) continue;
       const [hue, sat] = rgbToHsv(r, g, b);
       const k = bin(t);
       const central = Math.abs(x / img.width - 0.5) < 0.3 && Math.abs(y / img.height - 0.5) < 0.3 ? 2 : 1;
@@ -46,6 +57,7 @@ export function clothTones(img: Raster, limit = 10): ClothTone[] {
     if (out.length >= limit) break;
     const n = counts[k];
     const t = { cr: sums[k * 4] / n, cg: sums[k * 4 + 1] / n, lum: sums[k * 4 + 2] / n, sat: sums[k * 4 + 3] / n };
+    if (!isFelt(t, choice)) continue;
     if (out.some((o) => Math.hypot(o.cr - t.cr, o.cg - t.cg) < 0.02 && Math.abs(Math.log(o.lum / t.lum)) < 0.22)) continue;
     out.push(t);
   }
@@ -261,10 +273,12 @@ const STRONG = [[0.42, 1.7, 0.06]];
 /** A grey cloth differs from a grey wall or rail only in how bright it is: several bands are tried. */
 const PALE = [[0.72, 1.35, 0.032], [0.8, 1.22, 0.03], [0.87, 1.14, 0.028]];
 
-export function clothAreas(small: Raster): ClothArea[] {
+export function clothAreas(small: Raster, choice: FeltChoice = 'auto'): ClothArea[] {
   const out: ClothArea[] = [];
-  for (const t of clothTones(small)) {
-    const pale = t.sat < 0.25;
+  for (const t of clothTones(small, 10, choice)) {
+    // Beige and camel are the colour of wooden rails and floors: brightness has to tell them apart too.
+    const [hue] = rgbToHsv(t.cr, t.cg, Math.max(0, 1 - t.cr - t.cg));
+    const pale = t.sat < 0.25 || (t.sat < 0.6 && hue > 12 && hue < 58);
     for (const [lo, hi, tol] of pale ? PALE : STRONG) {
       out.push(...areasOf(small, t, lo, hi, tol, false));
       if (pale) out.push(...areasOf(small, t, lo, hi, tol, true));
@@ -273,11 +287,14 @@ export function clothAreas(small: Raster): ClothArea[] {
   return out.sort((a, b) => b.score - a.score);
 }
 
+/** Share of the best shape's score below which a shape is not the table, whatever its colour. */
+const UNLIKELY = 0.45;
+
 /**
  * Four corners of the cloth-coloured area (bed plus cushions) in picture coordinates, ordered
  * as `orderCorners` does; `bed` when it stops at the cushion noses. Null when nothing in the picture is shaped like a table.
  */
-export function findClothQuad(img: Raster): { quad: Vec2[]; bed: boolean } | null {
+export function findClothQuad(img: Raster, choice: FeltChoice = 'auto'): { quad: Vec2[]; bed: boolean } | null {
   const f = Math.max(1, Math.ceil(Math.max(img.width, img.height) / 320));
   const w = Math.floor(img.width / f);
   const h = Math.floor(img.height / f);
@@ -294,6 +311,11 @@ export function findClothQuad(img: Raster): { quad: Vec2[]; bed: boolean } | nul
       small.data[(y * w + x) * 4 + 3] = 255;
     }
   }
-  const best = clothAreas(small)[0];
+  let best = clothAreas(small, choice)[0];
+  if (best && choice !== 'auto') {
+    // Something else is far more like a table than anything of the colour asked for.
+    const any = clothAreas(small)[0];
+    if (any && best.score < UNLIKELY * any.score) best = any;
+  }
   return best ? { quad: best.quad.map((p) => ({ x: p.x * f, y: p.y * f })), bed: best.bed } : null;
 }

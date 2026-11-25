@@ -352,7 +352,7 @@ test('looks asked for at the same time are answered one after another, each with
     terminate() {},
   };
   const c = createLiveClient(() => fake as unknown as Worker);
-  const ask = (width: number) => c.look({ width, height: 1, data: new Uint8ClampedArray(4), corners: [], horizontal: true, lens: { k: 0 }, mode: '9', check: [], ref: null, cloth: null, sure: [], renew: false });
+  const ask = (width: number) => c.look({ width, height: 1, data: new Uint8ClampedArray(4), corners: [], horizontal: true, lens: { k: 0 }, mode: '9', check: [], ref: null, cloth: null, sure: [], renew: false, set: 'auto' });
   const both = Promise.all([ask(1), ask(2)]);
   const got = await both;
   expect(got.map((r) => r.cover)).toEqual([1, 2]);
@@ -384,4 +384,12 @@ test('a ball overlooked at first and added by hand later is followed like the ot
     if (k === 4) expect(t.balls().every((x) => !x.hidden)).toBe(true);
   }
   expect(done!.balls.find((x) => x.id === 9)!.pos.x).toBeCloseTo(0.9, 1);
+});
+
+import { knownFaces } from './looks';
+test('faces are taken from where balls of a known number lie, not from a player reaching in', () => {
+  const k = (hue: number) => ({ white: 0, black: 0, coloured: 1, hue, sat: 0.8, value: 0.8, bright: [1, 1, 1] as [number, number, number] });
+  const found = [{ pos: { x: 1, y: 0.5 }, look: k(10) }, { pos: { x: 2, y: 0.5 }, look: k(20), attached: true }, { pos: { x: 0.5, y: 0.5 }, look: k(30) }];
+  const balls = [{ id: 3, pos: { x: 1.005, y: 0.5 } }, { id: 5, pos: { x: 2, y: 0.5 } }, { id: null, pos: { x: 0.5, y: 0.5 } }, { id: 7, pos: { x: 1.5, y: 1 } }];
+  expect(knownFaces(found, balls).map((f) => [f.id, f.look.hue])).toEqual([[3, 10]]);
 });

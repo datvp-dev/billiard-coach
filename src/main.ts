@@ -2,7 +2,9 @@ import './style.css';
 import { createCards } from './ui/cards';
 import { attachDrag } from './ui/drag';
 import type { Layout } from './core/types';
+import { PLAIN } from './core/equipment';
 import { createLivePanel } from './ui/livePanel';
+import { createLookSheet } from './ui/lookSheet';
 import { createPhotoImport } from './ui/photo';
 import { sampleAt, simDuration } from './ui/replay';
 import { addSaved, loadSaved, removeSaved, restoreSaved, snapshotShot, storeSaved } from './ui/saved';
@@ -35,6 +37,7 @@ stageTools.className = 'stage-tools';
 const ICONS = {
   saved: 'M6 3h12a1 1 0 0 1 1 1v17l-7-4.5L5 21V4a1 1 0 0 1 1-1z',
   live: 'M12 10a2 2 0 1 0 0 4 2 2 0 0 0 0-4zM7.8 7.8a6 6 0 0 0 0 8.4M16.2 7.8a6 6 0 0 1 0 8.4M5 5a10 10 0 0 0 0 14M19 5a10 10 0 0 1 0 14',
+  look: 'M12 3a9 9 0 1 0 0 18c1.2 0 2-.9 2-2 0-1.4-1-1.6-1-2.7 0-.8.7-1.3 1.5-1.3H17a4 4 0 0 0 4-4c0-4.4-4-8-9-8zM7.5 12h.01M10 7.5h.01M15 7.8h.01',
   picture: 'M12 3v10m0 0l-4-4m4 4l4-4M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4',
 };
 /** Small icon-over-label button that fits in the strip beside an upright table. */
@@ -58,7 +61,10 @@ shotBtn.setAttribute('aria-label', 'Lưu ảnh bàn hiện tại');
 const { button: liveBtn, label: liveLabel } = toolButton(ICONS.live);
 liveLabel.textContent = 'Live';
 liveBtn.setAttribute('aria-label', 'Theo dõi live stream');
-stageTools.append(liveBtn, savedBtn, shotBtn);
+const { button: lookBtn, label: lookLabel } = toolButton(ICONS.look);
+lookLabel.textContent = 'Màu';
+lookBtn.setAttribute('aria-label', 'Chọn màu nỉ và bộ bi');
+stageTools.append(liveBtn, lookBtn, savedBtn, shotBtn);
 stage.append(canvas, stageTools);
 const trayEl = document.createElement('div');
 trayEl.className = 'tray';
@@ -76,7 +82,8 @@ const store = createStore(client, {
   setHash: (code) => history.replaceState(null, '', `#${code}`),
 });
 
-const photoImport = createPhotoImport({ host: document.body, mode: () => store.get().layout.mode, place: (layout) => store.setLayout(layout) });
+const equipment = () => store.get().equipment ?? PLAIN;
+const photoImport = createPhotoImport({ host: document.body, mode: () => store.get().layout.mode, equipment, setEquipment: (e) => store.setEquipment(e), place: (layout) => store.setLayout(layout) });
 const toolbar = createToolbar(bar, store, () => photoImport.pick());
 const tray = createTray(trayEl, store);
 const ui: TableUi = {};
@@ -187,6 +194,7 @@ const live = createLivePanel({
   root: livePanel,
   storage,
   mode: () => store.get().layout.mode,
+  equipment,
   place(layout) {
     stopReplay();
     liveLayout = layout;
@@ -209,6 +217,9 @@ store.subscribe((s) => {
   liveMode = s.layout.mode;
   live.modeChanged();
 });
+
+const lookSheet = createLookSheet({ host: document.body, get: equipment, set: (e) => store.setEquipment(e) });
+lookBtn.addEventListener('click', () => lookSheet.show());
 
 // --- Saved hand-set shots ---
 let saved = loadSaved(storage);

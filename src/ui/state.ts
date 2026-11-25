@@ -1,3 +1,4 @@
+import { PLAIN, readEquipment, type Equipment } from '../core/equipment';
 import { POWER_SPEEDS } from '../core/config';
 import { decodeLayout, encodeLayout, randomLayout } from '../core/layoutCodec';
 import { ballIdsForMode, placeBall } from '../core/table';
@@ -9,6 +10,8 @@ export type Potted = { id: number; pocket: PocketId };
 export type AppState = {
   layout: Layout;
   cloth: ClothSpeed;
+  /** Colours of the cloth and balls; the app finds out what is not said. */
+  equipment?: Equipment;
   advice: AdviceResult | null;
   selected: number;
   computing: boolean;
@@ -36,6 +39,8 @@ export type Store = {
   toggleBall(id: number): void;
   setMode(m: GameMode): void;
   setCloth(c: ClothSpeed): void;
+  /** Colours only: the shots stay as they are. */
+  setEquipment(patch: Partial<Equipment>): void;
   select(i: number): void;
   /** Play suggestion i: balls go where the simulation left them and advice is requested for the next ball. */
   applySuggestion(i: number): void;
@@ -63,14 +68,16 @@ const DEBOUNCE_MS = 150;
 const CLOTHS: ClothSpeed[] = ['fast', 'medium', 'slow'];
 
 /** URL hash first, then what was saved on this device, then a sample position. Never throws. */
-export function loadInitial(hash: string, storage: StorageLike | null): { layout: Layout; cloth: ClothSpeed } {
+export function loadInitial(hash: string, storage: StorageLike | null): { layout: Layout; cloth: ClothSpeed; equipment: Equipment } {
   let cloth: ClothSpeed = 'medium';
+  let equipment = PLAIN;
   let saved: Layout | null = null;
   try {
     const raw = storage?.getItem(STORAGE_KEY);
     if (raw) {
       const o = JSON.parse(raw);
       if (CLOTHS.includes(o?.cloth)) cloth = o.cloth;
+      equipment = readEquipment(o?.equipment);
       if (typeof o?.layout === 'string') {
         const l = decodeLayout(o.layout);
         if (l.balls.length > 0) saved = l;
@@ -86,14 +93,14 @@ export function loadInitial(hash: string, storage: StorageLike | null): { layout
   } catch {
     // malformed escape sequence in the URL
   }
-  return { layout: fromHash ?? saved ?? decodeLayout(SAMPLE_LAYOUT), cloth };
+  return { layout: fromHash ?? saved ?? decodeLayout(SAMPLE_LAYOUT), cloth, equipment };
 }
 
 export function createStore(
   client: AdvisorClient,
-  env: { storage: StorageLike | null; initial: { layout: Layout; cloth: ClothSpeed }; setHash?: (code: string) => void },
+  env: { storage: StorageLike | null; initial: { layout: Layout; cloth: ClothSpeed; equipment?: Equipment }; setHash?: (code: string) => void },
 ): Store {
-  let state: AppState = { layout: env.initial.layout, cloth: env.initial.cloth, advice: null, selected: 0, computing: true, potted: [], steps: 0, custom: null };
+  let state: AppState = { layout: env.initial.layout, cloth: env.initial.cloth, equipment: env.initial.equipment ?? PLAIN, advice: null, selected: 0, computing: true, potted: [], steps: 0, custom: null };
   let history: { layout: Layout; potted: Potted[] }[] = [];
   const subs = new Set<(s: AppState) => void>();
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -104,7 +111,7 @@ export function createStore(
   const persist = () => {
     const code = encodeLayout(state.layout);
     try {
-      env.storage?.setItem(STORAGE_KEY, JSON.stringify({ layout: code, cloth: state.cloth }));
+      env.storage?.setItem(STORAGE_KEY, JSON.stringify({ layout: code, cloth: state.cloth, equipment: state.equipment }));
     } catch {
       // storage full or blocked: the position still lives in the URL
     }
@@ -120,7 +127,7 @@ export function createStore(
     client.request(state.layout, { cloth: state.cloth });
   };
   const changed = (layout: Layout, cloth = state.cloth, potted: Potted[] = state.potted) => {
-    state = { layout, cloth, advice: null, selected: 0, computing: true, potted, steps: history.length, custom: null };
+    state = { layout, cloth, equipment: state.equipment, advice: null, selected: 0, computing: true, potted, steps: history.length, custom: null };
     if (timer !== null) clearTimeout(timer);
     timer = setTimeout(() => requestNow(), DEBOUNCE_MS);
     emit();
@@ -175,6 +182,11 @@ export function createStore(
     },
     setCloth(c) {
       if (c !== state.cloth) changed(state.layout, c);
+    },
+    setEquipment(patch) {
+      state = { ...state, equipment: { ...PLAIN, ...state.equipment, ...patch } };
+      persist();
+      emit();
     },
     select(i) {
       state = { ...state, selected: i, custom: null };

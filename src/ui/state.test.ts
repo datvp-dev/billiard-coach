@@ -317,5 +317,24 @@ test('opening a saved shot puts its table back and reopens the hand-set shot as 
   const last = other.requests[other.requests.length - 1];
   other.store.receive(advise(last, { cloth: 'fast' }), last);
   expect(other.store.get().custom!.power).toBe(2.5);
-  expect(JSON.parse(other.storage.getItem(STORAGE_KEY)!)).toEqual({ layout: shot.layout, cloth: 'fast' });
+  expect(JSON.parse(other.storage.getItem(STORAGE_KEY)!)).toMatchObject({ layout: shot.layout, cloth: 'fast' });
+});
+test('cloth colour and ball set are kept on this device, survive moves, and ask for no new advice', () => {
+  const client = { requests: 0, request() { this.requests++; }, dispose() {} };
+  const m = new Map<string, string>();
+  const storage = { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => void m.set(k, v) };
+  const s = createStore(client as unknown as Parameters<typeof createStore>[0], { storage, initial: loadInitial('', storage) });
+  expect(s.get().equipment).toEqual({ felt: 'auto', balls: 'auto' });
+  const before = client.requests;
+  s.setEquipment({ felt: 'blue' });
+  s.setEquipment({ balls: 'black' });
+  expect(client.requests).toBe(before);
+  expect(loadInitial('', storage).equipment).toEqual({ felt: 'blue', balls: 'black' });
+  s.clear();
+  expect(s.get().equipment).toEqual({ felt: 'blue', balls: 'black' });
+});
+test('a device that stored nothing about colours, or nonsense, starts plain', () => {
+  const storage = (v: string) => ({ getItem: () => v, setItem: () => {} });
+  expect(loadInitial('', storage('{"cloth":"fast"}')).equipment).toEqual({ felt: 'auto', balls: 'auto' });
+  expect(loadInitial('', storage('{"equipment":{"felt":9}}')).equipment).toEqual({ felt: 'auto', balls: 'auto' });
 });

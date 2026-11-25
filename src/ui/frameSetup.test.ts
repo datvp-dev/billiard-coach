@@ -3,7 +3,7 @@ import { PHYS, TABLE } from '../core/config';
 import { frameView } from '../vision/frame';
 import { SETBACK, SIGHTS } from '../vision/sights';
 import { photograph } from '../vision/synthetic';
-import { cornersInPicture, describeFrame, newSetup, noseHandle, preview, scaleSetup, search } from './frameSetup';
+import { cornersInPicture, describeFrame, firstSetup, newSetup, noseHandle, preview, scaleSetup, search } from './frameSetup';
 
 const { L, W, R } = TABLE;
 const SHOT = photograph({ width: 1000, height: 600, from: [L / 2 + 0.2, -1.7, 2], at: [L / 2, W / 2, 0], fov: 1.05, cloth: [0.05, 0.3, 0.14], sights: SETBACK }, [], true);
@@ -47,4 +47,14 @@ test('a setup kept as shares of the picture fits the same view at another size',
   expect(back.hand[2]!.x).toBeCloseTo(80, 9);
   expect(back.noses[1]!.y).toBeCloseTo(44, 9);
   expect(back.hand[3]).toBeNull();
+});
+test('of several first ideas the one whose sights are really there wins', () => {
+  const wrong = { corners: [{ x: 300, y: 10 }, { x: 600, y: 10 }, { x: 640, y: 120 }, { x: 260, y: 120 }], horizontal: true };
+  const good = { corners: SHOT.corners, horizontal: true };
+  expect(firstSetup(SHOT.img, [wrong, good])!.rough).toEqual(SHOT.corners);
+  expect(firstSetup(SHOT.img, [good, wrong])!.rough).toEqual(SHOT.corners);
+  // With no sights to judge by, the first stands.
+  const bare = photograph({ width: 600, height: 400, from: [L / 2, -1.7, 2], at: [L / 2, W / 2, 0], fov: 1.05, cloth: [0.05, 0.3, 0.14] }, [], true);
+  expect(firstSetup(bare.img, [{ corners: bare.corners, horizontal: true }, wrong])!.rough).toEqual(bare.corners);
+  expect(firstSetup(SHOT.img, [])).toBeNull();
 });

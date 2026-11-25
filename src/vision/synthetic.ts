@@ -1,4 +1,5 @@
 import { TABLE } from '../core/config';
+import { ballSet, type BallSetId } from '../core/equipment';
 import { POCKET_IDS, pocketCenter } from '../core/table';
 import type { Vec2 } from '../core/types';
 import { applyH, invertH } from './homography';
@@ -76,7 +77,9 @@ const unit = (a: V): V => mul(a, 1 / Math.hypot(a[0], a[1], a[2]));
 const STANDARD_SET: Record<number, V> = { 0: [0.93, 0.92, 0.86], 1: [0.95, 0.74, 0.06], 2: [0.08, 0.2, 0.65], 3: [0.82, 0.08, 0.1], 4: [0.32, 0.13, 0.5], 5: [0.95, 0.42, 0.07], 6: [0.03, 0.34, 0.17], 7: [0.45, 0.07, 0.1], 8: [0.03, 0.03, 0.03] };
 const TV_SET: Record<number, V> = { ...STANDARD_SET, 2: [0.1, 0.28, 0.75], 4: [0.95, 0.42, 0.55], 5: [0.95, 0.22, 0.06], 6: [0.02, 0.22, 0.13], 7: [0.45, 0.22, 0.1] };
 
-export type PhotoOptions = { width: number; height: number; from: V; at: V; /** Across the long side, radians. */ fov: number; cloth: V; tv?: boolean; tint?: V; noise?: number; /** Light diamonds on the rails, this far behind the noses. */ sights?: number };
+const linear = (hex: string): V => [1, 3, 5].map((i) => Math.pow(parseInt(hex.slice(i, i + 2), 16) / 255, 2.2)) as V;
+
+export type PhotoOptions = { width: number; height: number; from: V; at: V; /** Across the long side, radians. */ fov: number; cloth: V; tv?: boolean; /** Balls of this set, painted as its maker shows them. */ set?: BallSetId; tint?: V; noise?: number; /** Light diamonds on the rails, this far behind the noses. */ sights?: number };
 
 /**
  * A photo of the table by a person standing beside it: round balls on a bed below raised cushions,
@@ -89,7 +92,9 @@ export function photograph(o: PhotoOptions, balls: FakeBall[], horizontal: boole
   const rt = unit(cross(fw, [0, 0, 1]));
   const dn = cross(fw, rt);
   const f = (0.5 * Math.max(o.width, o.height)) / Math.tan(o.fov / 2);
-  const set = o.tv ? TV_SET : STANDARD_SET;
+  const made = o.set ? ballSet(o.set) : null;
+  const dark = made ? made.darkStripes : !!o.tv;
+  const set: Record<number, V> = made ? Object.fromEntries(made.paint.map((c, i) => [i, i === 0 || i === 8 ? STANDARD_SET[i] : linear(c)])) : o.tv ? TV_SET : STANDARD_SET;
   const tint = o.tint ?? [1, 1, 1];
   const lamps: V[] = [[L * 0.25, W / 2, 0.85], [L * 0.5, W / 2, 0.85], [L * 0.75, W / 2, 0.85]];
   const light = (p: V, n: V) => lamps.reduce((s, l) => {
@@ -117,7 +122,7 @@ export function photograph(o: PhotoOptions, balls: FakeBall[], horizontal: boole
       const n = mul(sub(p, hit.c), 1 / R);
       const lat = Math.abs(dot(n, hit.axis));
       let c = set[hit.id > 8 ? hit.id - 8 : hit.id];
-      if (hit.id > 8 && lat > 0.55) c = o.tv ? set[8] : set[0];
+      if (hit.id > 8 && lat > 0.55) c = dark ? set[8] : set[0];
       const spot = unit(cross(hit.axis, [0, 0, 1]));
       if (hit.id > 0 && Math.abs(dot(n, spot)) > 0.93) c = set[0];
       let out = mul(c, light(p, n) * (0.78 + 0.22 * n[2]) * 1.25);

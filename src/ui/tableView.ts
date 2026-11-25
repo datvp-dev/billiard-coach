@@ -1,4 +1,5 @@
 import { TABLE } from '../core/config';
+import { PLAIN, ballPaint, felt, type Equipment } from '../core/equipment';
 import { POCKET_IDS, pocketAxis, pocketCenter, targetBallId } from '../core/table';
 import type { BallPos, Suggestion, Vec2 } from '../core/types';
 import { activeSuggestion, type AppState } from './state';
@@ -36,11 +37,12 @@ export function computeTransform(cssW: number, cssH: number, portrait: boolean =
   };
 }
 
-const COLORS = ['#f6f2e6', '#f2c230', '#2463c4', '#d5362f', '#6d41a6', '#ef7f1f', '#1f8f4f', '#8a2433', '#17181a', '#f2c230', '#2463c4'];
-
-export function ballColor(id: number): { fill: string; stripe: boolean } {
-  return { fill: COLORS[id] ?? '#888', stripe: id >= 9 };
+export function ballColor(id: number, e: Equipment = PLAIN): { fill: string; stripe: boolean; band: string } {
+  return ballPaint(id, e.balls);
 }
+
+/** Colours of the table being drawn. */
+let look: Equipment = PLAIN;
 
 export type TableUi = {
   /** Ball being dragged and where the finger is, in CSS pixels. */
@@ -76,10 +78,10 @@ function drawBed(ctx: CanvasRenderingContext2D, t: ViewTransform) {
   ctx.stroke();
 
   const cushion = rectFromTable(t, -0.04, -0.04, L + 0.04, W + 0.04);
-  ctx.fillStyle = '#135c40';
+  ctx.fillStyle = look.felt === 'auto' ? '#135c40' : felt(look.felt).cushion;
   ctx.fillRect(cushion.x, cushion.y, cushion.w, cushion.h);
   const bed = rectFromTable(t, 0, 0, L, W);
-  ctx.fillStyle = '#1b7d57';
+  ctx.fillStyle = felt(look.felt).bed;
   ctx.fillRect(bed.x, bed.y, bed.w, bed.h);
 
   // Pockets
@@ -117,7 +119,7 @@ function drawBed(ctx: CanvasRenderingContext2D, t: ViewTransform) {
 function drawBall(ctx: CanvasRenderingContext2D, t: ViewTransform, b: BallPos, alpha = 1, size = 1) {
   const p = t.toScreen(b.pos);
   const r = R * t.scale * size;
-  const { fill, stripe } = ballColor(b.id);
+  const { fill, stripe, band } = ballColor(b.id, look);
   ctx.save();
   ctx.globalAlpha = alpha;
   ctx.beginPath();
@@ -126,7 +128,7 @@ function drawBall(ctx: CanvasRenderingContext2D, t: ViewTransform, b: BallPos, a
   ctx.fill();
   ctx.beginPath();
   ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
-  ctx.fillStyle = stripe ? '#f6f2e6' : fill;
+  ctx.fillStyle = stripe ? band : fill;
   ctx.fill();
   if (stripe) {
     ctx.save();
@@ -214,7 +216,7 @@ function drawOverlay(ctx: CanvasRenderingContext2D, t: ViewTransform, s: Suggest
   // Object ball path
   const objPath = s.sim.paths[s.targetId];
   if (objPath) {
-    ctx.strokeStyle = ballColor(s.targetId).fill;
+    ctx.strokeStyle = ballColor(s.targetId, look).fill;
     ctx.lineWidth = lw * 1.3;
     strokePath(ctx, t, objPath);
   }
@@ -276,6 +278,7 @@ function drawPotted(ctx: CanvasRenderingContext2D, t: ViewTransform, s: AppState
 }
 
 function drawScene(ctx: CanvasRenderingContext2D, t: ViewTransform, s: AppState, ui: TableUi) {
+  look = s.equipment ?? PLAIN;
   drawBed(ctx, t);
   drawPotted(ctx, t, s);
   const replaying = !!ui.replay;

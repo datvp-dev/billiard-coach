@@ -2,7 +2,8 @@ import { encodeLayout } from '../core/layoutCodec';
 import { ballIdsForMode } from '../core/table';
 import type { ClothSpeed, GameMode } from '../core/types';
 import type { AppState, Store } from './state';
-import { ballColor } from './tableView';
+import { PLAIN, type BallSetChoice } from '../core/equipment';
+import { ballDot } from './lookSheet';
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls = '', text = ''): HTMLElementTagNameMap[K] {
   const e = document.createElement(tag);
@@ -80,6 +81,7 @@ export function createToolbar(root: HTMLElement, store: Store, onPhoto?: () => v
 /** Row of balls: tap to put a ball on the table or take it off. */
 export function createTray(root: HTMLElement, store: Store): { update(s: AppState): void } {
   let mode: GameMode | null = null;
+  let set: BallSetChoice = PLAIN.balls;
   let buttons: { id: number; b: HTMLButtonElement }[] = [];
 
   const build = (m: GameMode) => {
@@ -87,10 +89,7 @@ export function createTray(root: HTMLElement, store: Store): { update(s: AppStat
     buttons = ballIdsForMode(m).map((id) => {
       const b = el('button', 'tray-ball');
       b.type = 'button';
-      const { fill, stripe } = ballColor(id);
-      const dot = el('span', 'dot' + (stripe ? ' stripe' : ''), id === 0 ? '' : String(id));
-      dot.style.setProperty('--c', fill);
-      b.append(dot);
+      b.append(ballDot(id, set));
       b.setAttribute('aria-label', id === 0 ? 'Bi cái' : `Bi ${id}`);
       b.addEventListener('click', () => store.toggleBall(id));
       root.append(b);
@@ -101,7 +100,15 @@ export function createTray(root: HTMLElement, store: Store): { update(s: AppStat
 
   return {
     update(s) {
-      if (s.layout.mode !== mode) build(s.layout.mode);
+      const want = (s.equipment ?? PLAIN).balls;
+      if (s.layout.mode !== mode) {
+        set = want;
+        build(s.layout.mode);
+      } else if (want !== set) {
+        // Repaint in place: a ball may be under the finger.
+        set = want;
+        for (const { id, b } of buttons) b.replaceChildren(ballDot(id, set));
+      }
       for (const { id, b } of buttons) {
         const potted = s.potted.some((x) => x.id === id);
         b.setAttribute('aria-pressed', String(s.layout.balls.some((x) => x.id === id)));
