@@ -2,9 +2,10 @@ import { expect, test } from 'vitest';
 import type { Vec2 } from '../core/types';
 import { photograph, type FakeBall } from '../vision/synthetic';
 import { watchTable } from '../vision/detect';
+import { straightenImage } from '../vision/lens';
 import { parseLiveLink } from './link';
 import { createTracker, type Look } from './tracker';
-import { SAME_VIEW, viewMatch, viewSignature } from './view';
+import { SAME_VIEW, pickView, turnedRound, viewMatch, viewSignature } from './view';
 
 const P = (x: number, y: number): Vec2 => ({ x, y });
 const B = (id: number | null, x: number, y: number, confidence = 0.8) => ({ id, pos: P(x, y), confidence });
@@ -110,6 +111,68 @@ test('the view is recognised after balls move and not after a cut to another cam
   const ref = viewSignature(a.img, a.corners, true);
   expect(viewMatch(ref, viewSignature(b.img, a.corners, true))).toBeGreaterThan(0.85);
   expect(viewMatch(ref, viewSignature(cut.img, a.corners, true))).toBeLessThan(SAME_VIEW - 0.1);
+});
+test('with several cameras chosen, a picture is read with the one it comes from, and with none after a cut to yet another', () => {
+  const END = { ...CAM, from: [-0.9, 0.2, 1.2] as [number, number, number], at: [1.6, 0.7, 0] as [number, number, number] };
+  const a = photograph(CAM, BALLS, true);
+  const e = photograph(END, BALLS, true);
+  const refs = [viewSignature(a.img, a.corners, true), viewSignature(e.img, e.corners, true)];
+  const sigs = (img: typeof a.img) => [viewSignature(img, a.corners, true), viewSignature(img, e.corners, true)];
+  const later = [{ id: 0, pos: P(1.1, 0.2) }, { id: 3, pos: P(0.2, 1.1) }];
+  expect(pickView(refs, sigs(photograph({ ...END, noise: 9, tint: [0.9, 0.9, 0.9] }, later, true).img))).toBe(1);
+  expect(pickView(refs, sigs(photograph({ ...CAM, noise: 9 }, later, true).img))).toBe(0);
+  const side = photograph({ ...CAM, from: [3.6, 1.9, 1.1], at: [1.0, 0.5, 0] }, BALLS, true);
+  expect(pickView(refs, sigs(side.img))).toBe(-1);
+  // A camera just added has nothing to compare with yet: this picture is its reference.
+  expect(pickView([refs[0], null], sigs(e.img))).toBe(1);
+});
+test('a camera at the other end of the table sees it turned round: told by where the balls lie', () => {
+  const known = [P(0.6, 0.6), P(1.7, 0.8), P(2.1, 0.4), P(0.9, 1.0)];
+  const round = (p: Vec2) => P(2.54 - p.x + 0.01, 1.27 - p.y - 0.008);
+  expect(turnedRound(known.map(round), known)).toBe(true);
+  expect(turnedRound(known.map((p) => P(p.x + 0.02, p.y)), known)).toBe(false);
+  // One ball missing and one extra make no difference.
+  expect(turnedRound([...known.slice(1).map(round), P(1.3, 0.2)], known)).toBe(true);
+  // Nothing to go by: as it is.
+  expect(turnedRound([P(1.27, 0.635)], [P(1.27, 0.635)])).toBe(false);
+  expect(turnedRound([], known)).toBe(false);
+});
+test('the rails are found on a picture as taken, where the lens bends them', () => {
+  const a = photograph(CAM, BALLS, true);
+  // The same picture through a lens that bends lines: a(bend(p, +k)) is where p shows.
+  const bent = straightenImage(a.img, { k: 0.06 });
+  const ref = viewSignature(a.img, a.corners, true);
+  const off = (s: Float32Array) => s.reduce((sum, v, i) => sum + Math.abs(v - ref[i]), 0) / s.length;
+  expect(off(viewSignature(bent, a.corners, true, { k: -0.06 }))).toBeLessThan(0.4 * off(viewSignature(bent, a.corners, true)));
+});
+test('a cut to another chosen camera, which places balls a little differently, is not a shot', () => {
+  const t = createTracker('9');
+  for (let k = 0; k < 6; k++) t.look({ ...look(noise(A, k)), view: 0 });
+  const shifted = A.map((b) => ({ ...b, pos: P(b.pos.x + 0.027, b.pos.y - 0.014) }));
+  const seen = [];
+  for (let k = 0; k < 8; k++) {
+    t.look({ ...look(noise(shifted, k)), view: 1 });
+    seen.push(t.status());
+  }
+  expect(seen).not.toContain('moving');
+  expect(t.status()).toBe('steady');
+  expect(t.balls().map((b) => b.id)).toEqual([0, 1, 2]);
+  expect(t.balls().every((b) => !b.hidden)).toBe(true);
+  // Back on the first camera nothing has moved either.
+  for (let k = 0; k < 4; k++) t.look({ ...look(noise(A, k)), view: 0 });
+  expect(t.status()).toBe('steady');
+  expect(t.balls().map((b) => b.id)).toEqual([0, 1, 2]);
+});
+test('balls on a camera just added keep the numbers they have where they lie, whatever their colours suggest', () => {
+  const t = createTracker('9');
+  for (let k = 0; k < 6; k++) t.look(look(A));
+  const there = [B(5, 0.62, 0.59), B(7, 1.68, 0.81), B(null, 2.11, 0.42), B(4, 1.2, 1.0)];
+  expect(t.recognise(there, true)).toEqual([
+    { pos: P(0.62, 0.59), id: 0 },
+    { pos: P(1.68, 0.81), id: 1 },
+    { pos: P(2.11, 0.42), id: 2 },
+    { pos: P(1.2, 1.0), id: 4 },
+  ]);
 });
 test('an empty spot is told from one with a ball or a sleeve on it', () => {
   const { img, corners } = photograph(CAM, BALLS, true);
@@ -317,6 +380,18 @@ test('a potted green ball is not found again in the green of a pocket', () => {
   expect(l.balls.map((b) => b.id)).toEqual([0, 7, 9]);
 });
 
+test('each camera has its own colours: faces learnt through one are not mixed into another\'s', () => {
+  const t = started();
+  // A warmer camera: the 3 shows orange-red, the 5 nearly yellow.
+  const warm: Record<number, BallLook> = { 0: F[0], 1: face(70), 3: face(30), 5: face(60) };
+  const W = (id: number, x: number, y: number) => ({ id, pos: P(x, y), confidence: 0.8, look: warm[id] });
+  const there = TABLE_A.map((b) => W(b.id!, b.pos.x, b.pos.y));
+  for (let k = 0; k < 14; k++) t.look({ balls: there, clear: [false, false, false, false], sameView: true, view: 1 });
+  const ids = (r: { id: number | null }[]) => r.map((m) => m.id);
+  expect(ids(t.recognise([{ ...W(5, 1.0, 1.0), id: null }, { ...W(3, 1.5, 0.2), id: null }]))).toEqual([5, 3]);
+  t.camera(0);
+  expect(ids(t.recognise([S(null, 1.0, 1.0, 3), S(null, 1.5, 0.2, 5)]))).toEqual([3, 5]);
+});
 test('starting over reads the table afresh but still knows the balls by their faces', () => {
   const t = started();
   // A new position; the colour rules have the 3 and the 5 the wrong way round.
@@ -352,7 +427,7 @@ test('looks asked for at the same time are answered one after another, each with
     terminate() {},
   };
   const c = createLiveClient(() => fake as unknown as Worker);
-  const ask = (width: number) => c.look({ width, height: 1, data: new Uint8ClampedArray(4), corners: [], horizontal: true, lens: { k: 0 }, mode: '9', check: [], ref: null, cloth: null, sure: [], renew: false, set: 'auto' });
+  const ask = (width: number) => c.look({ width, height: 1, data: new Uint8ClampedArray(4), views: [], mode: '9', check: [], sure: [], renew: false, set: 'auto' });
   const both = Promise.all([ask(1), ask(2)]);
   const got = await both;
   expect(got.map((r) => r.cover)).toEqual([1, 2]);

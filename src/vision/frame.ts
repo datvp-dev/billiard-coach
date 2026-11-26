@@ -10,6 +10,11 @@ const { L, W } = TABLE;
 /** Where the table is in a picture: corners of the nose line once the lens's bend is taken out. */
 export type TableFrame = { corners: Vec2[]; horizontal: boolean; lens: Lens };
 
+/** The same frame with the table the other way round: each place becomes the one opposite it. */
+export function turnFrame(f: TableFrame): TableFrame {
+  return { ...f, corners: f.corners.map((_, i) => f.corners[(i + 2) % 4]) };
+}
+
 export type FrameView = {
   /** Picture as taken <-> table; z is the height above the cushion noses. */
   toRaw(p: Vec2, z?: number): Vec2;

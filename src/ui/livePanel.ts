@@ -4,11 +4,11 @@ import type { GameMode, Layout, Vec2 } from '../core/types';
 import { knownFaces } from '../live/looks';
 import { parseLiveLink } from '../live/link';
 import { createTracker, type LiveStatus, type Tracker } from '../live/tracker';
-import type { ViewSignature } from '../live/view';
+import { turnedRound, type ViewSignature } from '../live/view';
 import type { ClothModel } from '../vision/balls';
 import { BALL_Z } from '../vision/balls';
 import { setOf } from '../vision/classify';
-import { frameView, type TableFrame } from '../vision/frame';
+import { frameView, turnFrame, type TableFrame } from '../vision/frame';
 import type { LiveReply } from '../worker/live.worker';
 import { createLiveClient } from '../worker/liveClient';
 import { scaleSetup, type FrameSetup } from './frameSetup';
@@ -25,8 +25,11 @@ const CROWDED = 0.05;
 /** Pause between two looks, ms. */
 const PAUSE_MS = 500;
 
+/** Cameras of one stream that can be lined up. */
+const MAX_VIEWS = 4;
+
 const STATUS_TEXT: Record<LiveStatus, string> = {
-  away: 'Đang chiếu góc máy khác. Chờ quay lại khung bàn đã chọn.',
+  away: 'Đang chiếu góc máy khác. Chờ quay lại góc đã chọn.',
   moving: 'Bi đang lăn…',
   settling: 'Đang đọc thế bi…',
   blocked: 'Có người che bàn. Giữ thế bi cũ tới khi nhìn rõ.',
@@ -42,11 +45,40 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls = '', text = ''):
 
 /** Places as shares of the frame, so a change of resolution does not move them. */
 type Choice = { frame: TableFrame; setup: FrameSetup; aspect: number };
+/**
+ * One camera of the stream: where the table is in it, what its rails look like to know it again,
+ * and its cloth with nobody over the table. `stale`: the cloth was taken with other balls on it
+ * than the player has since said there are.
+ */
+type View = {
+  choice: Choice;
+  ref: ViewSignature | null;
+  cloth: ClothModel | null;
+  stale: boolean;
+  /** Lined up from the other end of the table: its places are the opposite of the first camera's. */
+  turned: boolean;
+};
 
-/** The choice on a frame of this size, in pixels. */
+const shares = (c: FrameChoice, w: number, h: number): Choice => ({
+  frame: { ...c.frame, corners: c.frame.corners.map((p) => ({ x: p.x / w, y: p.y / h })) },
+  setup: scaleSetup(c.setup, 1 / w, 1 / h),
+  aspect: w / h,
+});
+
+/** The choice on a frame of this size, in pixels, as the player lined it up. */
 function sized(c: Choice, w: number, h: number): { frame: TableFrame; setup: FrameSetup } {
   return { frame: { ...c.frame, corners: c.frame.corners.map((p) => ({ x: p.x * w, y: p.y * h })) }, setup: scaleSetup(c.setup, w, h) };
 }
+
+/** The camera's frame in pixels, placing balls as the first camera does. */
+const aim = (v: View, w: number, h: number): TableFrame => {
+  const f = sized(v.choice, w, h).frame;
+  return v.turned ? turnFrame(f) : f;
+};
+
+/** Between the places of a camera lined up from the other end and those of the table. */
+const across = (turned: boolean, p: Vec2): Vec2 => (turned ? { x: L - p.x, y: W - p.y } : p);
+const acrossAll = <T extends { pos: Vec2 }>(turned: boolean, list: T[]): T[] => list.map((m) => ({ ...m, pos: across(turned, m.pos) }));
 
 export type LivePanelDeps = {
   root: HTMLElement;
@@ -103,11 +135,13 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
   video.playsInline = true;
   const client = createLiveClient();
   let stream: MediaStream | null = null;
-  let choice: Choice | null = null;
+  let views: View[] = [];
+  /** The camera of the last frame that showed one of them. */
+  let current = 0;
+  /** The last frame showed none of them. */
+  let elsewhere = false;
+  const chosen = (): Choice | null => views[current]?.choice ?? null;
   let tracker: Tracker | null = null;
-  let ref: ViewSignature | null = null;
-  /** The cloth as it was on the frame the player marked, with nobody over the table. */
-  let cloth: ClothModel | null = null;
   /** The set the checked balls turned out to be, when the player has not said. */
   let seems: BallSetId | null = null;
   const balls = () => (deps.equipment().balls === 'auto' ? seems ?? 'auto' : deps.equipment().balls);
@@ -122,8 +156,8 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
   let run = 0;
   /** Goes up with every correction: a look asked for before it is out of date. */
   let edits = 0;
-  /** The reference frame was painted for other balls than the player has since said there are. */
-  let stale = false;
+  /** What the buttons were made for, so the words can change without rebuilding them. */
+  let shown = '';
   let paintTimer: ReturnType<typeof setInterval> | null = null;
 
   const fit = (w: number, h: number) => {
@@ -164,23 +198,38 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
       actions.append(button('Kết nối', opened ? 'primary' : 'ghost', () => void connect()));
       return;
     }
-    if (!choice) {
+    shown = buttonsFor();
+    if (!views.length) {
       text.textContent = message || 'Khi luồng chiếu toàn bàn, bấm "Chọn khung bàn".';
       actions.append(button('Chọn khung bàn', 'primary', pickTable), button('Ngắt', 'ghost', () => stop('')));
       return;
     }
-    const unknown = tracker ? tracker.balls().filter((b) => b.id === null).length : 0;
-    text.textContent = message || (paused ? 'Đã tạm dừng.' : STATUS_TEXT[tracker?.status() ?? 'settling'] + (unknown && tracker?.status() === 'steady' ? ` ${unknown} bi chưa rõ số.` : ''));
+    text.textContent = message || statusText();
+    const more = canAdd();
     actions.append(
+      ...(more ? [button('Thêm góc máy', 'primary', addView)] : []),
       button(paused ? 'Tiếp tục' : 'Tạm dừng', paused ? 'primary' : 'ghost', () => {
         paused = !paused;
         render();
       }),
-      button('Sửa bi', 'ghost', editBalls),
-      button('Đọc lại bi', 'ghost', () => void reread()),
-      button('Chọn khung', 'ghost', pickTable),
+      ...(elsewhere ? [] : [button('Sửa bi', 'ghost', editBalls), button('Đọc lại bi', 'ghost', () => void reread())]),
+      button(views.length > 1 ? 'Chọn lại từ đầu' : 'Chọn khung', 'ghost', pickTable),
       button('Ngắt', 'ghost', () => stop('')),
     );
+  }
+
+  /** The stream shows a camera that has not been chosen, and there is room for one more. */
+  const canAdd = () => !!tracker && elsewhere && !paused && views.length < MAX_VIEWS;
+  const buttonsFor = () => `${views.length}|${elsewhere}|${paused}|${canAdd()}`;
+
+  function statusText(): string {
+    if (paused) return 'Đã tạm dừng.';
+    const s = elsewhere ? 'away' : tracker?.status() ?? 'settling';
+    const unknown = tracker ? tracker.balls().filter((b) => b.id === null).length : 0;
+    const which = views.length > 1 && !elsewhere ? `Góc máy ${current + 1}/${views.length}. ` : '';
+    const add = s !== 'away' ? '' : canAdd() ? ' Nếu góc này thấy cả bàn, bấm "Thêm góc máy" để đọc bi cả ở góc này.' : '';
+    const bare = !elsewhere && !views[current]?.cloth ? ' Đang có người che lúc chọn khung; app sẽ lấy lại nền khi bàn trống.' : '';
+    return which + STATUS_TEXT[s] + (unknown && s === 'steady' ? ` ${unknown} bi chưa rõ số.` : '') + add + bare;
   }
 
   function put(layout: Layout) {
@@ -192,23 +241,26 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
 
   /** The table as it is being read, on the current frame, to put right by hand. */
   function editBalls() {
-    if (!choice || !tracker || !ready()) return;
+    const choice = chosen();
+    if (!choice || !tracker || !ready() || elsewhere) return;
     const frame = grab();
     const start = sized(choice, frame.width, frame.height);
+    const at = current;
+    const { turned } = views[at];
     const mine = run;
     editing = true;
     deps.openFrame(frame, {
       start,
-      markers: tracker.balls().map((b) => ({ pos: b.pos, id: b.id })),
+      markers: acrossAll(turned, tracker.balls().map((b) => ({ pos: b.pos, id: b.id }))),
       doneLabel: 'Lưu sửa',
       cancel: () => (editing = false),
       done: (c) => {
         editing = false;
         if (mine !== run || !tracker) return;
-        if (!same(c.frame, start.frame)) return follow(c, frame);
+        if (!same(c.frame, start.frame)) return follow(c, frame, tracker, at, turned);
         edits++;
-        stale = true;
-        put(tracker.correct(c.markers));
+        spoil();
+        put(tracker.correct(acrossAll(turned, c.markers)));
         refresh();
       },
     });
@@ -216,10 +268,13 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
 
   /** Wipe the table and read the balls again from the picture as it is now, for the player to check. */
   async function reread() {
-    if (!choice || !tracker || !ready() || editing) return;
+    const choice = chosen();
+    if (!choice || !tracker || !ready() || editing || elsewhere) return;
     const frame = grab();
     const { width, height } = frame;
     const start = sized(choice, width, height);
+    const at = current;
+    const v = views[at];
     const mine = run;
     const t = tracker;
     editing = true;
@@ -227,7 +282,7 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
     const img = frame.getContext('2d', { willReadFrequently: true })!.getImageData(0, 0, width, height);
     let r: LiveReply | null = null;
     try {
-      r = await client.look({ width, height, data: img.data, ...start.frame, mode: deps.mode(), check: [], ref, cloth, sure: [], renew: false, set: balls() });
+      r = await client.look({ width, height, data: img.data, views: [{ ...aim(v, width, height), ref: v.ref, cloth: v.cloth }], mode: deps.mode(), check: [], sure: [], renew: false, set: balls() });
     } catch {
       // told below
     }
@@ -240,7 +295,7 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
     const crowded = r.cover > 0.012;
     deps.openFrame(frame, {
       start,
-      markers: t.recognise(r.balls),
+      markers: acrossAll(v.turned, t.recognise(r.balls)),
       doneLabel: 'Dùng thế bi này',
       cancel: () => {
         editing = false;
@@ -249,12 +304,11 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
       done: (c) => {
         editing = false;
         if (mine !== run || tracker !== t) return;
-        if (!same(c.frame, start.frame)) return follow(c, frame);
         edits++;
         // With nobody over the table this frame is also the better one to compare with from now on.
-        if (!crowded) return follow(c, frame, t);
-        stale = true;
-        put(t.restart(c.markers));
+        if (!same(c.frame, start.frame) || !crowded) return follow(c, frame, t, at, v.turned);
+        spoil();
+        put(t.restart(acrossAll(v.turned, c.markers)));
         refresh();
       },
     });
@@ -306,11 +360,10 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
     video.srcObject = null;
     if (paintTimer !== null) clearInterval(paintTimer);
     paintTimer = null;
-    choice = null;
+    views = [];
+    current = 0;
+    elsewhere = false;
     tracker = null;
-    ref = null;
-    cloth = null;
-    stale = false;
     seems = null;
     paused = false;
     message = why;
@@ -325,6 +378,7 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
       return;
     }
     const frame = grab();
+    const choice = elsewhere ? null : chosen();
     const fits = choice && Math.abs(choice.aspect - frame.width / frame.height) < 0.01;
     deps.openFrame(frame, {
       ...(choice && fits ? { start: sized(choice, frame.width, frame.height) } : {}),
@@ -333,20 +387,63 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
     });
   }
 
-  /** Start following from a frame the player has checked; `known` keeps what its balls look like. */
-  function follow(c: FrameChoice, frame: HTMLCanvasElement, known: Tracker | null = null) {
+  /**
+   * Line the table up on the camera the stream shows now, as one more view of the same table. The
+   * balls have not moved since the last camera: they keep their numbers where they lie.
+   */
+  function addView() {
+    const t = tracker;
+    if (!t || !ready() || !canAdd()) return;
+    const frame = grab();
+    const slot = views.length;
+    const mine = run;
+    let turned = false;
+    editing = true;
+    deps.openFrame(frame, {
+      doneLabel: 'Thêm góc này',
+      name: (found) => {
+        const known = t.balls().filter((b) => b.id !== null).map((b) => b.pos);
+        turned = turnedRound(found.filter((b) => !b.attached).map((b) => b.pos), known);
+        t.camera(slot);
+        return acrossAll(turned, t.recognise(acrossAll(turned, found), true));
+      },
+      cancel: () => {
+        editing = false;
+        t.camera(current);
+        refresh();
+      },
+      done: (c) => {
+        editing = false;
+        if (mine !== run || tracker !== t) return;
+        edits++;
+        follow(c, frame, t, slot, turned);
+      },
+    });
+  }
+
+  /** What the player said about the balls makes every camera's cloth out of date. */
+  const spoil = () => views.forEach((v) => (v.stale = true));
+
+  /**
+   * Start following from a frame the player has checked; `known` keeps what its balls look like.
+   * With `slot` the frame is that camera, new or lined up again, and the other cameras stay.
+   */
+  function follow(c: FrameChoice, frame: HTMLCanvasElement, known: Tracker | null = null, slot?: number, turned = false) {
     if (!stream) return;
     run++;
-    choice = { frame: { ...c.frame, corners: c.frame.corners.map((p) => ({ x: p.x / frame.width, y: p.y / frame.height })) }, setup: scaleSetup(c.setup, 1 / frame.width, 1 / frame.height), aspect: frame.width / frame.height };
+    const view: View = { choice: shares(c, frame.width, frame.height), ref: null, cloth: null, stale: false, turned };
+    if (slot === undefined) views = [view];
+    else views[slot] = view;
+    current = slot ?? 0;
+    elsewhere = false;
     tracker = known ?? createTracker(deps.mode());
-    ref = null;
-    cloth = null;
-    stale = false;
+    tracker.camera(current);
     paused = false;
     message = '';
     // What the player has just checked is the starting position.
     const data = frame.getContext('2d', { willReadFrequently: true })!.getImageData(0, 0, frame.width, frame.height);
-    const first = known ? known.restart(c.markers) : tracker.seed(c.markers);
+    const markers = acrossAll(turned, c.markers);
+    const first = known ? known.restart(markers) : tracker.seed(markers);
     if (known || first.balls.length > 0) put(first);
     render();
     void loop(run, { width: data.width, height: data.height, data: data.data });
@@ -355,7 +452,7 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
   /** The chosen frame fixes what the view looks like; after that, one look after another. */
   async function loop(mine: number, first: { width: number; height: number; data: Uint8ClampedArray }) {
     let still: typeof first | null = first;
-    while (mine === run && choice && tracker) {
+    while (mine === run && views.length && tracker) {
       if (!still && (paused || editing || !ready())) {
         await wait(PAUSE_MS);
         continue;
@@ -364,7 +461,7 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
       if (still) img = still;
       else {
         const { w, h } = fit(video.videoWidth, video.videoHeight);
-        if (Math.abs(w / h - choice.aspect) > 0.02) {
+        if (Math.abs(w / h - views[0].choice.aspect) > 0.02) {
           message = 'Khung hình của thẻ đã đổi kích thước. Bấm "Chọn khung".';
           render();
           await wait(PAUSE_MS);
@@ -381,22 +478,38 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
       const { width, height } = img;
       const t = tracker;
       const asked = edits;
+      // The frame the player has just checked is the new camera's: it is compared with that one only.
+      const asking = still ? [current] : views.map((_, i) => i);
       try {
-        const r = await client.look({ width, height, data: img.data, ...sized(choice, width, height).frame, mode: deps.mode(), check: t.watched(), ref, cloth, sure: t.places(), renew: stale && t.status() === 'steady', set: balls() });
+        const r = await client.look({
+          width,
+          height,
+          data: img.data,
+          views: asking.map((i) => ({ ...aim(views[i], width, height), ref: still ? null : views[i].ref, cloth: views[i].cloth })),
+          mode: deps.mode(),
+          check: t.watched(),
+          sure: t.places(),
+          renew: views.some((v) => v.stale) && t.status() === 'steady',
+          set: balls(),
+        });
         if (mine !== run) return;
+        const at = r.view < 0 ? -1 : asking[r.view];
+        const v = at < 0 ? null : views[at];
         // A frame with somebody over the table is no measure of what is always there: wait for a clear one.
         // After a correction the old one is wrong about which things are balls.
-        if (r.cloth && r.sameView && asked === edits && r.cover < CROWDED) {
-          cloth = r.cloth;
-          stale = false;
+        if (v && r.cloth && asked === edits && r.cover < CROWDED) {
+          v.cloth = r.cloth;
+          v.stale = false;
         }
         if (still) {
-          ref = r.signature;
+          if (v) v.ref = r.signature;
           t.meet(r.balls);
           // The player has just checked the numbers: they say which set this is.
           seems = setOf(knownFaces(r.balls, t.balls())) ?? seems;
         } else if (!paused && !editing && asked === edits) {
-          const layout = t.look({ balls: r.balls, clear: r.clear, sameView: r.sameView, cover: r.cover });
+          elsewhere = at < 0;
+          if (at >= 0) current = at;
+          const layout = t.look({ balls: r.balls, clear: r.clear, sameView: r.sameView, cover: r.cover, view: at < 0 ? undefined : at });
           if (layout) put(layout);
         }
       } catch {
@@ -411,11 +524,8 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
 
   /** Update the words without rebuilding the buttons under the player's finger. */
   function refresh() {
-    if (!choice || !tracker || message) return render();
-    const unknown = tracker.balls().filter((b) => b.id === null).length;
-    const s = tracker.status();
-    const bare = cloth || paused ? '' : ' Đang có người che lúc chọn khung; app sẽ lấy lại nền khi bàn trống.';
-    const next = paused ? 'Đã tạm dừng.' : STATUS_TEXT[s] + (unknown && s === 'steady' ? ` ${unknown} bi chưa rõ số.` : '') + bare;
+    if (!views.length || !tracker || message || shown !== buttonsFor()) return render();
+    const next = statusText();
     if (text.textContent !== next) text.textContent = next;
   }
 
@@ -428,7 +538,9 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
     let sy = 0;
     let sw = vw;
     let sh = vh;
-    const table = choice ? frameView(sized(choice, vw, vh).frame, vw, vh) : null;
+    // Another camera is shown in full, so the player can see whether it is worth adding.
+    const v = elsewhere ? null : views[current];
+    const table = v ? frameView(aim(v, vw, vh), vw, vh) : null;
     // The cushions' edges, bent as the lens bends them.
     const quad = table ? [[0, 0], [L, 0], [L, W], [0, W]].flatMap(([x, y], i, all) => [0, 1, 2, 3].map((k) => table.toRaw({ x: x + ((all[(i + 1) & 3][0] - x) * k) / 4, y: y + ((all[(i + 1) & 3][1] - y) * k) / 4 }))) : null;
     if (quad) {
@@ -451,7 +563,7 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
     ctx.drawImage(video, sx, sy, sw, sh, 0, 0, cw, ch);
     if (!quad || !table) return;
     const at = (p: Vec2) => ({ x: (p.x - sx) * k, y: (p.y - sy) * k });
-    const away = tracker?.status() === 'away';
+    const away = elsewhere || tracker?.status() === 'away';
     ctx.strokeStyle = away ? 'rgba(239,107,94,0.8)' : 'rgba(242,194,48,0.8)';
     ctx.lineWidth = 1.5 * dpr;
     ctx.beginPath();
@@ -484,7 +596,7 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
   }
 
   canvas.addEventListener('click', () => {
-    if (choice && tracker) editBalls();
+    if (tracker && !elsewhere) editBalls();
   });
   form.addEventListener('submit', (e) => {
     e.preventDefault();
@@ -537,7 +649,7 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
         return;
       }
       edits++;
-      stale = true;
+      spoil();
       board = layout;
       // Balls that have no number yet are not on the app's table; they stay.
       const unnamed = tracker.balls().filter((b) => b.id === null).map((b) => ({ pos: b.pos, id: null }));
@@ -548,11 +660,10 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
     modeChanged() {
       if (!tracker) return;
       run++;
-      choice = null;
+      views = [];
+      current = 0;
+      elsewhere = false;
       tracker = null;
-      ref = null;
-      cloth = null;
-      stale = false;
       message = 'Đã đổi chế độ chơi. Bấm "Chọn khung bàn" để theo dõi lại.';
       render();
       message = '';

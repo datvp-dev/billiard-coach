@@ -2,7 +2,7 @@ import { TABLE } from '../core/config';
 import { BALL_SETS, FELTS, ballSet, inkOn, type Equipment } from '../core/equipment';
 import { ballIdsForMode } from '../core/table';
 import type { GameMode, Layout, Vec2 } from '../core/types';
-import { BALL_Z } from '../vision/balls';
+import { BALL_Z, type FoundBall } from '../vision/balls';
 import { setOf } from '../vision/classify';
 import { detectBalls, guessCorners } from '../vision/detect';
 import { snapToSight, type FoundSights } from '../vision/findSights';
@@ -67,7 +67,15 @@ export type FrameChoice = { frame: TableFrame; setup: FrameSetup; markers: Marke
  * A still frame of a video to mark the table on; `start` reuses an earlier choice, and `markers`
  * goes straight to checking those balls.
  */
-export type FrameRequest = { start?: { frame: TableFrame; setup: FrameSetup }; markers?: Marker[]; doneLabel: string; done(choice: FrameChoice): void; cancel?(): void };
+export type FrameRequest = {
+  start?: { frame: TableFrame; setup: FrameSetup };
+  markers?: Marker[];
+  doneLabel: string;
+  /** Numbers for the balls found on the frame, instead of what their colours suggest. */
+  name?(balls: FoundBall[]): Marker[];
+  done(choice: FrameChoice): void;
+  cancel?(): void;
+};
 
 /** Something that can be dragged while the table is being lined up. */
 type Grip = { kind: 'corner' | 'sight' | 'nose'; i: number };
@@ -154,7 +162,7 @@ export function createPhotoImport(deps: { host: HTMLElement; mode(): GameMode; e
   function findBalls() {
     if (!raster) return;
     const balls = detectBalls(straightenImage(raster, frame.lens), frame.corners, frame.horizontal, deps.mode(), deps.equipment().balls);
-    markers = balls.map((f) => ({ pos: f.pos, id: f.id }));
+    markers = frameReq?.name ? frameReq.name(balls) : balls.map((f) => ({ pos: f.pos, id: f.id }));
     untouched = true;
     selected = -1;
     const set = setOf(balls.flatMap((f) => (f.id !== null && f.look ? [{ id: f.id, look: f.look }] : [])));

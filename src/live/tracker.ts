@@ -25,6 +25,11 @@ const COVERED = 0.012;
 const NUDGE = 0.011;
 /** Worst likeness at which a ball is still taken for a missing one. */
 const ALIKE = 2.4;
+/**
+ * Two cameras lined up by hand place the same ball up to this far apart. Right after a cut from one
+ * to the other, a ball within it is the same ball.
+ */
+const OTHER_CAMERA = 2 * R;
 
 export type LiveBall = { pos: Vec2; id: number | null; hidden: boolean };
 export type LiveStatus = 'away' | 'moving' | 'settling' | 'blocked' | 'steady';
@@ -39,6 +44,8 @@ type Track = {
   hidden: boolean;
   /** Looks so far, averaged, and how the general colour rules would name it. */
   face: Profile | undefined;
+  /** Its looks through the other cameras: colours differ from one camera to the next. */
+  faces: Map<number, Profile | undefined>;
   votes: Map<number, number>;
 };
 
@@ -50,6 +57,8 @@ export type Look = {
   sameView: boolean;
   /** Share of the bed hidden by people. */
   cover?: number;
+  /** Which of the chosen cameras the picture is from, when there are several. */
+  view?: number;
 };
 
 const gap = (a: Vec2, b: Vec2) => Math.hypot(a.x - b.x, a.y - b.y);
@@ -120,7 +129,10 @@ function assign(cost: number[][], cols: number, skip: number): (number | null)[]
 export function createTracker(mode: GameMode) {
   const ids = ballIdsForMode(mode);
   let tracks: Track[] = [];
-  const profiles = new Map<number, Profile>();
+  /** What each numbered ball looks like, for each camera. */
+  const shelves = new Map<number, Map<number, Profile>>();
+  const shelf = (v: number) => shelves.get(v) ?? shelves.set(v, new Map()).get(v)!;
+  let profiles = shelf(0);
   /** Balls that left their place in this shot and have not been found yet, and for how many looks. */
   const lost = new Map<number, number>();
   /** Places the player said hold no ball; trusted until they are seen empty. */
@@ -130,8 +142,25 @@ export function createTracker(mode: GameMode) {
   let young = 0;
   let status: LiveStatus = 'settling';
   let published: Layout | null = null;
+  let camera = 0;
+  /** The picture has just cut to another chosen camera: balls are matched more loosely once. */
+  let cut = false;
 
-  const track = (pos: Vec2, id: number | null): Track => ({ pos, id, told: false, pinned: false, age: 1, hidden: false, face: undefined, votes: new Map() });
+  const track = (pos: Vec2, id: number | null): Track => ({ pos, id, told: false, pinned: false, age: 1, hidden: false, face: undefined, faces: new Map(), votes: new Map() });
+
+  /** From now on the pictures come from camera `v`. */
+  const useCamera = (v: number) => {
+    if (v === camera) return;
+    for (const t of tracks) {
+      t.faces.set(camera, t.face);
+      t.face = t.faces.get(v);
+    }
+    camera = v;
+    profiles = shelf(v);
+    cut = true;
+    last = null;
+    calm = 0;
+  };
 
   const layoutNow = (): Layout => {
     const layout: Layout = { mode, balls: [] };
@@ -214,7 +243,7 @@ export function createTracker(mode: GameMode) {
   };
 
   const settle = (balls: FoundBall[], clear: boolean[], person: boolean) => {
-    const pairs = pairUp(tracks.map((t) => t.pos), balls.map((b) => b.pos), SAME).filter(([i, j]) => !impostor(tracks[i], balls[j]));
+    const pairs = pairUp(tracks.map((t) => t.pos), balls.map((b) => b.pos), cut ? OTHER_CAMERA : SAME).filter(([i, j]) => !impostor(tracks[i], balls[j]));
     const seen = new Map(pairs);
     const taken = new Set(pairs.map(([, j]) => j));
     // A ball has left: there was a shot, and what was put on by hand must now be seen like the rest.
@@ -250,6 +279,7 @@ export function createTracker(mode: GameMode) {
     // Nothing is missing, so this is not a ball that moved. If it stays, and nobody is around,
     // somebody put it there.
     tracks = tracks.filter((t) => !(t.id === null && person && t.age > AGE));
+    cut = false;
   };
 
   return {
@@ -260,7 +290,8 @@ export function createTracker(mode: GameMode) {
     /** Balls checked by the player on a clear frame. */
     seed(balls: { pos: Vec2; id: number | null }[]): Layout {
       tracks = balls.map((b) => ({ ...track(b.pos, b.id), told: b.id !== null, pinned: true, age: AGE }));
-      profiles.clear();
+      shelves.clear();
+      profiles = shelf(camera);
       lost.clear();
       ignored = [];
       last = null;
@@ -269,19 +300,31 @@ export function createTracker(mode: GameMode) {
       published = layoutNow();
       return published;
     },
-    /** Balls on a frame, named by the faces known so far where there are any. Parts of players are left out. */
-    recognise(balls: FoundBall[]): { pos: Vec2; id: number | null }[] {
+    /**
+     * Balls on a frame, named by the faces known so far where there are any. Parts of players are
+     * left out. `byPlace`: the balls have not moved since the last look through another camera, so
+     * one found where a numbered ball lies is that ball.
+     */
+    recognise(balls: FoundBall[], byPlace = false): { pos: Vec2; id: number | null }[] {
       const real = balls.filter((b) => !b.attached);
-      const cost = real.map((b) =>
-        ids.map((id) => {
+      const named = byPlace ? tracks.filter((t) => t.id !== null) : [];
+      const fixed = new Map<number, number | null>(pairUp(real.map((b) => b.pos), named.map((t) => t.pos), OTHER_CAMERA).map(([i, j]) => [i, named[j].id]));
+      const free = ids.filter((id) => ![...fixed.values()].includes(id));
+      const rest = real.map((_, i) => i).filter((i) => !fixed.has(i));
+      const cost = rest.map((i) => {
+        const b = real[i];
+        return free.map((id) => {
           const p = profiles.get(id);
           const vote = b.id === id ? 0.2 + b.confidence : 0;
           return p && b.look ? Math.max(0, lookGap(p.look, b.look) - 0.5 * vote) : Math.max(0, 2.6 - 2 * vote);
-        }),
-      );
-      const got = assign(cost, ids.length, ALIKE);
-      return real.map((b, i) => ({ pos: b.pos, id: got[i] === null ? null : ids[got[i]!] }));
+        });
+      });
+      const got = assign(cost, free.length, ALIKE);
+      rest.forEach((i, k) => fixed.set(i, got[k] === null ? null : free[got[k]!]));
+      return real.map((b, i) => ({ pos: b.pos, id: fixed.get(i) ?? null }));
     },
+    /** The pictures now come from camera `v` of the chosen ones. */
+    camera: (v: number) => useCamera(v),
     /** Forget the table and go on from this one. What each ball looks like is kept. */
     restart(balls: { pos: Vec2; id: number | null }[]): Layout {
       tracks = balls.map((b) => ({ ...track(b.pos, b.id), told: b.id !== null, pinned: true, age: AGE }));
@@ -335,6 +378,7 @@ export function createTracker(mode: GameMode) {
     },
     /** Feed one look; returns a new position for the table when there is one. */
     look(l: Look): Layout | null {
+      if (l.view !== undefined && l.sameView) useCamera(l.view);
       if (!l.sameView) {
         status = 'away';
         last = null;
