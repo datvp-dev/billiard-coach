@@ -158,6 +158,8 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
   let edits = 0;
   /** What the buttons were made for, so the words can change without rebuilding them. */
   let shown = '';
+  /** Until then a second press of "Thêm góc máy" adds the camera that seems to be chosen already. */
+  let armedUntil = 0;
   let paintTimer: ReturnType<typeof setInterval> | null = null;
 
   const fit = (w: number, h: number) => {
@@ -207,7 +209,7 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
     text.textContent = message || statusText();
     const more = canAdd();
     actions.append(
-      ...(more ? [button('Thêm góc máy', 'primary', addView)] : []),
+      ...(more ? [button('Thêm góc máy', elsewhere ? 'primary' : 'ghost', addView)] : []),
       button(paused ? 'Tiếp tục' : 'Tạm dừng', paused ? 'primary' : 'ghost', () => {
         paused = !paused;
         render();
@@ -218,11 +220,12 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
     );
   }
 
-  /** The stream shows a camera that has not been chosen, and there is room for one more. */
-  const canAdd = () => !!tracker && elsewhere && !paused && views.length < MAX_VIEWS;
+  /** There is room for one more camera. */
+  const canAdd = () => !!tracker && views.length < MAX_VIEWS;
   const buttonsFor = () => `${views.length}|${elsewhere}|${paused}|${canAdd()}`;
 
   function statusText(): string {
+    if (Date.now() < armedUntil) return `Luồng đang chiếu góc máy ${current + 1} đã chọn. Nếu đây là góc khác, bấm "Thêm góc máy" lần nữa.`;
     if (paused) return 'Đã tạm dừng.';
     const s = elsewhere ? 'away' : tracker?.status() ?? 'settling';
     const unknown = tracker ? tracker.balls().filter((b) => b.id === null).length : 0;
@@ -393,7 +396,15 @@ export function createLivePanel(deps: LivePanelDeps): { toggle(): void; modeChan
    */
   function addView() {
     const t = tracker;
-    if (!t || !ready() || !canAdd()) return;
+    if (!t || !ready() || !canAdd() || editing) return;
+    // The picture looks like a camera already chosen: that takes a second press.
+    if (!elsewhere && Date.now() >= armedUntil) {
+      armedUntil = Date.now() + 6000;
+      refresh();
+      setTimeout(() => views.length && refresh(), 6100);
+      return;
+    }
+    armedUntil = 0;
     const frame = grab();
     const slot = views.length;
     const mine = run;
